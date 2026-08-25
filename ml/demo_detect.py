@@ -19,8 +19,20 @@ import sys
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).parent))
+from sidecar import correct_plate
+
 IMG_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 VID_EXT = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
+
+
+_warned: set[str] = set()
+
+
+def _warn_once(msg: str) -> None:
+    if msg not in _warned:
+        _warned.add(msg)
+        print(f"warning: {msg}")
 
 
 def pick_model(explicit: str | None) -> str:
@@ -82,7 +94,12 @@ def main() -> None:
     if args.ocr:
         try:
             from paddleocr import PaddleOCR
-            reader = PaddleOCR(lang="en", use_textline_orientation=False)
+            # enable_mkldnn=False is NOT a performance knob here. Paddle's
+            # oneDNN executor throws ConvertPirAttribute2RuntimeAttribute on
+            # this CPU build, on every predict() call. Without this the reader
+            # constructs fine and then reads nothing, forever.
+            reader = PaddleOCR(lang="en", use_textline_orientation=False,
+                               enable_mkldnn=False)
         except Exception as exc:            # PaddleOCR's API moves between majors
             print(f"warning: OCR unavailable ({type(exc).__name__}), boxes only")
 
@@ -124,7 +141,11 @@ def main() -> None:
             return None
         try:
             res = reader.predict(crop)
-        except Exception:
+        except Exception as exc:
+            # Warn ONCE. Swallowing this silently makes a broken PaddleOCR
+            # install look identical to "the plates were unreadable", and
+            # paddle does throw here on some CPU/oneDNN builds.
+            _warn_once(f"OCR failed ({type(exc).__name__}: {exc}), boxes only")
             return None
         raw = ""
         for page in res or []:
@@ -133,9 +154,10 @@ def main() -> None:
                 raw = max(got, key=len)
                 break
         if not raw:
+            if res and not isinstance(res[0], dict):
+                _warn_once(f"OCR returned {type(res[0]).__name__}, not the dict "
+                           "this reader expects -- paddleocr API moved")
             return None
-        sys.path.insert(0, str(Path(__file__).parent))
-        from sidecar import correct_plate
         fixed, _ = correct_plate(raw)
         # Show the raw read when correction rejects it -- "OCR saw something we
         # could not validate" is different from "OCR saw nothing", and the demo
@@ -144,13 +166,27 @@ def main() -> None:
 
     if is_video:
         cap = cv2.VideoCapture(str(items[0]))
-        fps = cap.get(cv2.CAP_PROP_FPS) or 25
+        # VideoCapture does not raise on a file it cannot decode -- it just
+        # returns a closed handle whose every read fails, and VideoWriter then
+        # silently refuses a 0x0 frame. Without this, the run reports success
+        # and writes nothing.
+        if not cap.isOpened():
+            sys.exit(f"cannot decode video: {items[0]}\n"
+                     "Not a video, or the codec is missing from this OpenCV build.")
+        src_fps = cap.get(cv2.CAP_PROP_FPS) or 25
         w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        # 5 FPS, matching the real pipeline budget -- see CLAUDE.md. Only the
+        # processed frames are written, at 5 FPS, so the boxes stay on screen.
+        # Writing every frame at source FPS shows each box for one frame (40ms
+        # at 25fps) -- a flicker, on the tool whose whole job is being looked at.
+        step = max(1, round(src_fps / 5))
+        out_fps = src_fps / step
         dst = args.out / f"{items[0].stem}_annotated.mp4"
-        writer = cv2.VideoWriter(str(dst), cv2.VideoWriter_fourcc(*"mp4v"), fps, (w, h))
-        # 5 FPS, matching the real pipeline budget -- see CLAUDE.md.
-        step = max(1, round(fps / 5))
+        writer = cv2.VideoWriter(str(dst), cv2.VideoWriter_fourcc(*"mp4v"), out_fps, (w, h))
+        if not writer.isOpened():
+            cap.release()
+            sys.exit(f"cannot write {dst} (no mp4v encoder in this OpenCV build)")
         i = 0
         while True:
             ok, frame = cap.read()
@@ -162,10 +198,10 @@ def main() -> None:
                 total_ms += (time.time() - t0) * 1000
                 total_plates += annotate(frame, r.boxes)
                 frames += 1
-            writer.write(frame)
+                writer.write(frame)
             i += 1
         cap.release(); writer.release()
-        print(f"\nwrote {dst}")
+        print(f"\nwrote {dst}  ({frames} frames at {out_fps:.0f} fps)")
     else:
         for p in items:
             frame = cv2.imread(str(p))
@@ -179,7 +215,10 @@ def main() -> None:
             n = annotate(frame, r.boxes)
             total_plates += n
             frames += 1
-            dst = args.out / f"{p.stem}_annotated.jpg"
+            # Flatten the path into the name: rglob can hand us train/a.jpg
+            # and val/a.jpg, and a flat `a_annotated.jpg` loses one of them.
+            stem = p.stem if p == src else "_".join(p.relative_to(src).with_suffix("").parts)
+            dst = args.out / f"{stem}_annotated.jpg"
             cv2.imwrite(str(dst), frame)
             print(f"  {p.name:44} {n} plate(s)  {ms:5.0f} ms")
 

@@ -69,21 +69,27 @@ def load_yolo(src: Path, images: dict[str, Path]) -> dict[Path, list[Box]]:
             parts = line.split()
             if len(parts) < 5:
                 continue
-            try:
-                vals = [float(v) for v in parts[1:]]
-            except ValueError:
-                continue
-            if len(vals) == 4:
-                cx, cy, bw, bh = vals
-            elif len(vals) >= 6 and len(vals) % 2 == 0:
+            vals = []
+            for v in parts[1:]:          # stop at the first non-number: some
+                try:                     # exports append `difficult`, `crowd`...
+                    vals.append(float(v))
+                except ValueError:
+                    break
+            if len(vals) >= 8 and len(vals) % 2 == 0:
                 # Roboflow's "YOLOv8" export is sometimes INSTANCE SEGMENTATION:
                 # `class x1 y1 x2 y2 ...` polygon points rather than a box.
                 # Reading fields 1-4 of that gives a box built from the first two
                 # polygon vertices -- garbage that still trains, just on nonsense.
                 # Collapse the polygon to its bounding box instead.
+                # ponytail: 8 not 6, because `class cx cy w h conf track_id` is
+                # also 6 even values and is FAR commoner than a 3-vertex polygon.
+                # A real segmentation mask is a quad or better. A triangle label
+                # loses its third vertex; nothing else here can tell them apart.
                 xs, ys = vals[0::2], vals[1::2]
                 x1, x2, y1, y2 = min(xs), max(xs), min(ys), max(ys)
                 cx, cy, bw, bh = (x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1
+            elif len(vals) >= 4:
+                cx, cy, bw, bh = vals[:4]   # trailing conf/track_id ignored
             else:
                 continue
             if bw > 0 and bh > 0:
@@ -261,6 +267,18 @@ def _selfcheck() -> None:
         assert fmt == "YOLO"
         assert all(abs(a - b) < 1e-6 for a, b in zip(list(got.values())[0][0], want)), \
             f"polygon must collapse to its bounding box, got {list(got.values())[0][0]}"
+
+        # Same box carrying trailing fields -- `conf`, `track_id`, `difficult`.
+        # 6 even values here must NOT be mistaken for a 3-vertex polygon.
+        for tail in ("0.97", "0.97 3", "difficult"):
+            t = root / f"tail{len(tail)}"
+            (t / "images").mkdir(parents=True); (t / "labels").mkdir()
+            (t / "images" / "a.jpg").write_bytes(b"x")
+            (t / "labels" / "a.txt").write_text(f"0 0.5 0.4 0.5 0.4 {tail}\n")
+            got, fmt = find_pairs(t)
+            assert fmt == "YOLO", f"{tail!r} -> {fmt}"
+            assert all(abs(a - b) < 1e-6 for a, b in zip(list(got.values())[0][0], want)), \
+                f"trailing {tail!r} corrupted the box: {list(got.values())[0][0]}"
 
         c = root / "coco"; c.mkdir(); (c / "a.jpg").write_bytes(b"x")
         (c / "ann.json").write_text(json.dumps({
