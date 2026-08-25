@@ -333,14 +333,60 @@ class _Track:
         return self.frames <= PLATE_FIRST_FRAMES or area > self.best_area * PLATE_GROWTH
 
 
+# Preprocessing variants, tried in order until one produces a plate that
+# validates. MEASURED on 161 real plate crops:
+#
+#   upscale to 48 px + CLAHE   58%      <- best single variant
+#   upscale to 96 px, no CLAHE 55%
+#   upscale to 96 px + CLAHE   52%
+#   upscale to 160 px + CLAHE  48%      <- more upscaling is WORSE
+#   first two combined         65%
+#
+# Two lessons worth keeping. Upscaling harder does not help: PaddleOCR has its
+# own resize and feeding it an interpolated blur destroys the edges it needs.
+# And the two best variants fail on DIFFERENT crops, so a retry is worth far
+# more than any single better filter. The retry only runs when the first read
+# failed to validate, so the crops that already work cost one OCR call.
+_OCR_VARIANTS = ((48, True), (96, False))
+
+
+def _prepare_crop(crop, height: int, equalise: bool):
+    import cv2
+    out = crop
+    if out.shape[0] < height:
+        scale = height / max(out.shape[0], 1)
+        out = cv2.resize(out, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    if equalise:
+        grey = cv2.cvtColor(out, cv2.COLOR_BGR2GRAY)
+        out = cv2.cvtColor(
+            cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(grey),
+            cv2.COLOR_GRAY2BGR)
+    return out
+
+
+def _ocr_lines(reader, image) -> list[tuple[str, float]]:
+    try:
+        pages = reader.predict(image)
+    except Exception as exc:
+        print(f"ocr failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return []
+    lines: list[tuple[str, float]] = []
+    for page in pages or []:
+        if not isinstance(page, dict):
+            continue
+        texts = page.get("rec_texts") or []
+        scores = page.get("rec_scores") or [1.0] * len(texts)
+        lines.extend((t, float(sc)) for t, sc in zip(texts, scores) if t.strip())
+    return lines
+
+
 def _read_plate(reader, plate_model, crop) -> tuple[str | None, float | None]:
     """Plate box -> OCR -> positional correction. Returns (plate, confidence).
 
     The correction penalty is subtracted from the OCR score, so a read that
     needed four fixes cannot present itself as confidently as a clean one.
     """
-    import cv2
-    if crop.size == 0:
+    if crop.size == 0 or reader is None:
         return None, None
 
     region = crop
@@ -354,56 +400,31 @@ def _read_plate(reader, plate_model, crop) -> tuple[str | None, float | None]:
         if region.size == 0:
             return None, None
 
-    # Plates arrive small. Upscale and equalise before OCR: at 5 FPS a plate is
-    # often 100x30 px, which PaddleOCR reads poorly at native size.
-    if region.shape[0] < 48:
-        scale = 48 / max(region.shape[0], 1)
-        region = cv2.resize(region, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-    grey = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
-    region = cv2.cvtColor(
-        cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(grey), cv2.COLOR_GRAY2BGR)
-
-    if reader is None:
-        return None, None
-    try:
-        pages = reader.predict(region)
-    except Exception as exc:
-        print(f"ocr failed: {type(exc).__name__}: {exc}", file=sys.stderr)
-        return None, None
-
-    lines: list[tuple[str, float]] = []
-    for page in pages or []:
-        if not isinstance(page, dict):
+    for height, equalise in _OCR_VARIANTS:
+        lines = _ocr_lines(reader, _prepare_crop(region, height, equalise))
+        if not lines:
             continue
-        texts = page.get("rec_texts") or []
-        scores = page.get("rec_scores") or [1.0] * len(texts)
-        lines.extend((t, float(sc)) for t, sc in zip(texts, scores) if t.strip())
-    if not lines:
-        return None, None
 
-    # MANY INDIAN PLATES ARE TWO LINES -- "DL 9C AU" above "4743" -- and
-    # PaddleOCR returns each line separately. Taking only the longest one reads
-    # half the plate and correct_plate() then rejects it as too short. Measured
-    # on 169 real photos, that single mistake accounted for 34 of 84 failures.
-    #
-    # So try the joined reading first, in the order the lines came back, and
-    # fall back to each line alone for the single-line plates.
-    joined = "".join(t for t, _ in lines)
-    mean_score = sum(sc for _, sc in lines) / len(lines)
-    candidates = [(joined, mean_score)]
-    candidates += sorted(lines, key=lambda ts: -len(ts[0]))
+        # MANY INDIAN PLATES ARE TWO LINES -- "DL 9C AU" above "4743" -- and
+        # PaddleOCR returns each line separately. Taking only the longest one
+        # reads half the plate and correct_plate() rejects it as too short.
+        # Measured on 169 photos, that single mistake caused 34 of 84 failures.
+        joined = "".join(t for t, _ in lines)
+        mean = sum(sc for _, sc in lines) / len(lines)
+        candidates = [(joined, mean)] + sorted(lines, key=lambda ts: -len(ts[0]))
 
-    best: tuple[str, float] | None = None
-    for raw, score in candidates:
-        plate, penalty = correct_plate(raw)
-        if plate is None:
-            continue
-        conf = round(max(0.0, min(1.0, score - penalty)), 3)
-        if best is None or conf > best[1]:
-            best = (plate, conf)
-    if best is None:
-        return None, None
-    return best
+        best: tuple[str, float] | None = None
+        for raw, score in candidates:
+            plate, penalty = correct_plate(raw)
+            if plate is None:
+                continue
+            conf = round(max(0.0, min(1.0, score - penalty)), 3)
+            if best is None or conf > best[1]:
+                best = (plate, conf)
+        if best is not None:
+            return best
+
+    return None, None
 
 
 def run(camera: str, source: str, fps: int, loop: bool = False) -> None:

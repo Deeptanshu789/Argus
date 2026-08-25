@@ -71,6 +71,38 @@ stack immature, inference-only), 30 GB RAM.
 
 ## Train exactly one model — on Kaggle
 
+### Measured, on 169 held-out Indian plate photos the model never trained on
+
+| Stage | Result |
+|---|---|
+| Detector mAP50 / precision / recall | **0.928 / 0.957 / 0.912** |
+| Plate box found | 161/169 (95%) |
+| Read and validated | 105/161 (65% yield) |
+| **End to end** | **105/169 (62%)** |
+
+`npm run` equivalent: `python ml/validate_plate.py --model
+runs/detect/plate/weights/best.pt --data ~/indian-plates --ocr`.
+
+**The detector is not the bottleneck — OCR is.** It finds a plate in 95% of
+photos; a third of those still fail to read. Three fixes took end-to-end from
+50% to 62% with no retraining at all:
+
+1. `correct_plate()` accepted only `AA DD A(A) DDDD`. `DL9CAU4743` is a real
+   Delhi plate (district code is digit-then-letter) and `MH05DK101` has a
+   three-digit series. Both were thrown away.
+2. PaddleOCR returns each line of a **two-line plate** separately, and the
+   reader took only the longest — half a plate, rejected as too short. 34 of
+   84 failures.
+3. Two preprocessing variants fail on *different* crops, so a retry beats any
+   single better filter: 58% and 55% alone, 65% combined.
+
+Upscaling harder makes it **worse** (48 px 58%, 160 px 48%): PaddleOCR resizes
+internally and an interpolated blur destroys the edges it needs.
+
+Yield is an upper bound on accuracy — nothing checks a read against the true
+plate, so a confident wrong answer counts as a success. Writing down the real
+plate for fifty images is half an hour and is required before quoting a number.
+
 | Model | Decision |
 |---|---|
 | Plate detector (YOLOv8n) | **Fine-tune on Kaggle GPU.** COCO has no plate class. |
@@ -80,6 +112,13 @@ stack immature, inference-only), 30 GB RAM.
 
 Kaggle T4: ~20-40 s/epoch, so 50 epochs is ~20-35 min. Local `--cpu` fallback is
 ~6-15 min/epoch, 15-25x slower — only if Kaggle is unavailable.
+
+**The shipped weights used 3,400 of the 8,823 available images** (`SUBSET=3000`,
+`VAL=400` in `ml/kaggle_train.ipynb`), 50 epochs at `imgsz=640`. So no, the
+dataset is not exhausted. Retraining on all of it is one Kaggle hour and would
+plausibly move mAP50 from 0.928 to ~0.94 — which is **+3 images out of 169**,
+against the 56 that the detector finds and OCR cannot read. Do it only after
+OCR yield stops being the limit.
 
 Develop the sidecar against stock `yolov8n.pt` + a stub plate region; trained
 weights are a one-line swap at a single call site.
