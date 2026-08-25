@@ -1,8 +1,8 @@
 # Training the plate detector
 
 Two routes: **Kaggle GPU** (recommended, ~45 min) and **this laptop's CPU**
-(~5 h). Same dataset, same script, same output. Pick one; there is no reason to
-do both except curiosity.
+(~8-9 h). Same dataset, same script, same output. Pick one; there is no reason
+to do both except curiosity.
 
 Every step has a **check** immediately after it. Run the check. A training run
 that fails silently and finishes anyway is exactly how the first model ended up
@@ -236,7 +236,17 @@ Into `plate-new`, **not** over `plate`. Score both before replacing anything.
 
 ## Route B — this laptop, CPU only
 
-**Time:** ~4 min 45 s per epoch, so 60 epochs is **about 5 hours**.
+**Time:** measured on this machine, 8,023 images at `imgsz=480`, `freeze=10`:
+
+| | per epoch |
+|---|---|
+| training pass only | ~4 min 45 s |
+| **with per-epoch validation and plots (the default)** | **~8 min 30 s** |
+
+So 60 epochs is **8-9 hours**, not 5. Validation runs the full 800-image val
+split every epoch and costs as much as training does on CPU. Pass
+`--epochs 30` to halve it, or accept the wall time.
+
 No GPU: the Radeon 860M has no ROCm installed and the XDNA2 NPU is
 inference-only. This is CPU, all 16 Zen 5 threads.
 
