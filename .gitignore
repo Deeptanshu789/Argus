@@ -23,3 +23,4 @@ dist/
 next-env.d.ts
 .env.local
 tsconfig.tsbuildinfo
+ml/demo_out/

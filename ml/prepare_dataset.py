@@ -70,8 +70,21 @@ def load_yolo(src: Path, images: dict[str, Path]) -> dict[Path, list[Box]]:
             if len(parts) < 5:
                 continue
             try:
-                cx, cy, bw, bh = (float(v) for v in parts[1:5])
+                vals = [float(v) for v in parts[1:]]
             except ValueError:
+                continue
+            if len(vals) == 4:
+                cx, cy, bw, bh = vals
+            elif len(vals) >= 6 and len(vals) % 2 == 0:
+                # Roboflow's "YOLOv8" export is sometimes INSTANCE SEGMENTATION:
+                # `class x1 y1 x2 y2 ...` polygon points rather than a box.
+                # Reading fields 1-4 of that gives a box built from the first two
+                # polygon vertices -- garbage that still trains, just on nonsense.
+                # Collapse the polygon to its bounding box instead.
+                xs, ys = vals[0::2], vals[1::2]
+                x1, x2, y1, y2 = min(xs), max(xs), min(ys), max(ys)
+                cx, cy, bw, bh = (x1 + x2) / 2, (y1 + y2) / 2, x2 - x1, y2 - y1
+            else:
                 continue
             if bw > 0 and bh > 0:
                 boxes.append((_clip(cx), _clip(cy), _clip(bw), _clip(bh)))
@@ -238,6 +251,16 @@ def _selfcheck() -> None:
         got, fmt = find_pairs(y)
         assert fmt == "YOLO" and len(got) == 1
         assert all(abs(a - b) < 1e-6 for a, b in zip(list(got.values())[0][0], want))
+
+        # Roboflow segmentation export: polygon points, not a box. Same geometry.
+        seg = root / "seg"; (seg / "images").mkdir(parents=True); (seg / "labels").mkdir()
+        (seg / "images" / "a.jpg").write_bytes(b"x")
+        (seg / "labels" / "a.txt").write_text(
+            "0 0.25 0.2 0.75 0.2 0.75 0.6 0.25 0.6 0.25 0.2\n")
+        got, fmt = find_pairs(seg)
+        assert fmt == "YOLO"
+        assert all(abs(a - b) < 1e-6 for a, b in zip(list(got.values())[0][0], want)), \
+            f"polygon must collapse to its bounding box, got {list(got.values())[0][0]}"
 
         c = root / "coco"; c.mkdir(); (c / "a.jpg").write_bytes(b"x")
         (c / "ann.json").write_text(json.dumps({
