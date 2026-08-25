@@ -146,6 +146,11 @@ stuck at 0.2.5; the real deep-person-reid is a source build. Ultralytics
 BoT-SORT (`ml/botsort.yaml`, `with_reid: True, model: auto`) gives tracking and
 appearance embeddings from a dependency we need anyway.
 
+Measured on this machine: YOLOv8n + BoT-SORT with ReID at `imgsz=480` runs
+**~17 ms/frame single stream** on CPU (synthetic frame, so treat it as a ceiling
+— real footage with many detections is slower). The budget is 20 inferences/sec
+across 4 streams, so there is real headroom.
+
 Embedding dimension is therefore **not fixed at 512** — it is whatever that
 model emits. Every camera must emit the same dimension; `worker/ingest.ts`
 checks this and fails loudly, because a mismatch makes cosine similarity return

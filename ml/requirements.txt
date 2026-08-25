@@ -16,11 +16,21 @@
 # Python 3.12, not 3.13 -- paddlepaddle has no 3.13 wheels.
 
 ultralytics>=8.3        # detection AND tracking AND Re-ID embeddings, see below
+lap>=0.5.12             # BoT-SORT's assignment solver
 paddleocr>=3.0
 paddlepaddle>=3.0
-opencv-python-headless>=4.9
 openvino>=2024.0
 numpy>=1.26
+
+# `lap` is pinned deliberately. Ultralytics AutoUpdates it on first track() call
+# if missing -- a pip install triggered mid-run. Fine at a desk, not fine on a
+# demo machine on venue wifi, and it prints "Restart runtime for updates to take
+# effect" right when you need the run to just work.
+#
+# No opencv line: ultralytics pulls opencv-python and paddlex pulls
+# opencv-contrib-python, both of which provide `cv2`. Adding
+# opencv-python-headless on top installs a THIRD distribution over the same
+# import name. Let the two libraries bring what they each need.
 
 # NO torchreid. The PyPI package of that name is an unofficial repackaging that
 # stops at 0.2.5, and the real deep-person-reid is a source install with a
