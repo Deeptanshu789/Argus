@@ -1,5 +1,12 @@
 # Argus — Project Construction, Training Plan, and Wiki Publish
 
+> **Superseded in one respect (2026-08-25):** training moved from strictly-local
+> CPU to **Kaggle GPU**. The local CPU path survives as a fallback behind
+> `ml/train_plate.py --cpu`. Everything else in this document still stands —
+> notably that **inference is still CPU**, so the OpenVINO export, the 5 FPS
+> budget, and the sparse OCR / Re-ID scheduling all still apply. Current
+> instructions live in `WORKFLOW.md` and the wiki's Model-Training page.
+
 ## Context
 
 `/home/deep/code/Argus` currently holds exactly one file: `sih26127_implementation_plan.md`, a 385-line strategy document for SIH problem statement 26127 (BEL — city-wide ANPR + cross-camera trajectory tracking + traffic analytics). It is a good *pitch* but not an executable project: it assumes a 6-person team, six AI co-pilots, and unspecified GPU hardware, and it contains no repo layout, no API contract, no runnable training procedure, and no assignment of work to real people.

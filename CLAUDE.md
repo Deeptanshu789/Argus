@@ -28,33 +28,41 @@ This machine has **no NVIDIA GPU**.
   the Linux Ryzen AI stack is immature and it is inference-only
 - 30 GB RAM, ~76 GB free on `/home`
 
-So: **everything is CPU.** Never propose `device=0`, `--half`, AMP, or a
-CUDA-only library. Training config is tuned for this in `ml/train_plate.py`.
+So: **all inference is CPU** — the pipeline, the demo, everything that runs
+here. Never propose `device=0`, `--half`, TensorRT, or a CUDA-only library for
+runtime code. **Training is the one exception: it runs on Kaggle GPU**, which is
+why `ml/train_plate.py` defaults to GPU settings and hides the CPU path behind
+`--cpu`.
 
-## Train exactly one model
+## Train exactly one model — on Kaggle
 
 | Model | Decision |
 |---|---|
-| Plate detector (YOLOv8n) | **Fine-tune locally on CPU.** COCO has no plate class. |
+| Plate detector (YOLOv8n) | **Fine-tune on Kaggle GPU.** COCO has no plate class. |
 | Vehicle detector | Stock `yolov8n.pt`. COCO already has car/bus/truck/motorcycle. |
 | Re-ID (OSNet) | Pretrained `osnet_x1_0` weights. CPU training is days. |
 | OCR (PaddleOCR) | Pretrained + regex/state-code correction (`O↔0`, `I↔1`, `B↔8`). |
 
-Local CPU training is ~6-15 min/epoch on a 3K-image subset at 480px, so ~5-13 h
-for 50 epochs. Kaggle T4 does the same job in ~30-55 min, ~15-25x faster — but
-the local run is unattended and overnight, which is why it was chosen. Always
-run `--epochs 1` first and budget from the **measured** time, not an estimate.
+**Training runs on Kaggle, not on this machine.** Free T4 x2 / P100, ~20-40
+s/epoch, so 50 epochs is ~20-35 min end to end. Use `ml/kaggle_train.ipynb`.
 
-**Kick training off at hour 0 and develop against stock `yolov8n.pt` + a stub
-plate region.** Trained weights are a one-line swap at a single call site. The
-worst failure mode for this project is finding out at hour 20 that the detector
-still needs eight hours of CPU.
+The local CPU fallback still exists behind `--cpu` (~6-15 min/epoch, 5-13 h for
+the same job, 15-25x slower). Use it only if Kaggle is unavailable — do not
+suggest it as the default.
+
+**Inference is still CPU.** Only training moved; the demo runs on this laptop.
+That is why `ml/export_onnx.py` targets OpenVINO int8, and why the 5 FPS /
+sparse-OCR / Re-ID-on-exit budget below still applies in full.
+
+Develop the pipeline against stock `yolov8n.pt` + a stub plate region anyway.
+Trained weights are a one-line swap at a single call site, and that decoupling
+is worth keeping even now that training is fast.
 
 ## Ownership
 
 | | Dev A (repo owner) | Dev B |
 |---|---|---|
-| Owns | ML training, `ml/`, `backend/`, `db/`, Docker | `frontend/`, demo assets |
+| Owns | `ml/`, `backend/`, `db/`, Docker | `frontend/`, demo assets |
 | Scope | ANPR pipeline, ByteTrack + Re-ID, cross-camera engine, analytics, FastAPI + WebSocket, Postgres/TimescaleDB, Redis, Celery | Camera grid, deck.gl city map, analytics charts, vehicle search, alerts panel, camera network graph data, demo video, deck |
 
 `backend/` and `frontend/` are disjoint trees — merge conflicts should be near
@@ -76,13 +84,19 @@ Stage 0.
 ```bash
 docker compose up -d db redis          # infra only, the usual dev mode
 docker compose up -d                   # whole stack
-uvicorn backend.main:app --reload      # backend dev
+uvicorn backend.mock:app --reload      # mock API (works today)
+uvicorn backend.main:app --reload      # real backend
 cd frontend && npm run dev             # frontend dev
 
-python ml/prepare_dataset.py --src <downloaded-dataset> --subset 3000 --val 400
-python ml/train_plate.py --epochs 1    # CALIBRATION — always first
-tail -f ml/train.log                   # check a background run
+# training: Kaggle, via ml/kaggle_train.ipynb (GPU defaults, no flags needed)
+python ml/train_plate.py --epochs 50            # on Kaggle
+python ml/train_plate.py --cpu --epochs 1       # local fallback only
+
 python ml/export_onnx.py --weights runs/detect/plate/weights/best.pt
+
+# mock API — unblocks the frontend. Implemented and tested.
+uvicorn backend.mock:app --reload --port 8000
+python backend/mock.py                          # fixture selfcheck
 ```
 
 ## Conventions

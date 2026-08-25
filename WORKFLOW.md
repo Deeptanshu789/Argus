@@ -13,17 +13,17 @@ Two people:
 
 ## The one rule that shapes everything
 
-**Start model training before you write any code, then walk away from it.**
+**Freeze the API contract before either developer writes real code.**
 
-Training the plate detector on this machine is CPU-only and takes 5-13 hours.
-That is fine — it is unattended. It is only fine *if it starts at hour 0*.
-Everything downstream is developed against stock `yolov8n.pt` with a stub plate
-region, and the trained weights drop in later at a single call site.
+With two people and no code review, an unannounced response-shape change costs
+an hour of confused debugging at exactly the moment neither of you has an hour.
+The contract is frozen, the mock server already serves it, and the frontend is
+built against fixtures from minute one.
 
-The worst failure mode for this project is discovering at hour 20 that the
-detector still needs eight hours of CPU.
-
----
+Training used to be the long pole; it no longer is. It runs on **Kaggle GPU** in
+about half an hour (see Stage 1). What is still true: develop the pipeline
+against stock `yolov8n.pt` with a stub plate region, and swap the trained
+weights in at a single call site. Never block a developer on a training run.
 
 ## Stage 0 — One-time setup
 
@@ -43,8 +43,9 @@ Python environment:
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
+pip install -r backend/requirements.txt          # mock API: fastapi + uvicorn
 pip install ultralytics paddleocr torchreid opencv-python openvino \
-            fastapi "uvicorn[standard]" psycopg2-binary redis celery
+            psycopg2-binary redis celery                # real pipeline
 ```
 
 Bring up infra and apply the schema (Compose applies `db/schema.sql`
@@ -60,70 +61,124 @@ then `npm i deck.gl maplibre-gl recharts`.
 
 ---
 
-## Stage 1 — Start training
+## Stage 1 — Train on Kaggle
 
-**Dev A, hour 0. Do this before Stage 2.**
+**Repo owner. ~45 min wall clock, mostly unattended.**
 
-Datasets rot, so nothing is auto-downloaded. Fetch one by hand — Roboflow
-Universe is the easiest since it exports YOLO format directly:
+Training runs on Kaggle's free GPU (T4 x2 / P100), not on the build laptop —
+the laptop has no CUDA device, and the same job there takes 5-13 hours instead
+of half an hour.
+
+### 1. Get a dataset
+
+Nothing is auto-downloaded: dataset URLs and layouts rot, and a broken
+downloader at hour 0 is the worst possible time to debug one. On Kaggle, use
+**Add Data** to attach one in YOLO format — Roboflow Universe exports work
+directly.
 
 - <https://universe.roboflow.com/search?q=indian+number+plate>
-- <https://huggingface.co/datasets/Dataclusterlabspvtltd/indian-number-plates-dataset>
 - <https://www.kaggle.com/datasets/praveen12345/indian-number-plate-detection>
+- <https://huggingface.co/datasets/Dataclusterlabspvtltd/indian-number-plates-dataset>
 
-```bash
-python ml/prepare_dataset.py --src ~/Downloads/indian-plates --subset 3000 --val 400
-```
+### 2. Run the notebook
 
-### The calibration run — do not skip this
+Upload `ml/kaggle_train.ipynb` to Kaggle, then:
 
-```bash
-python ml/train_plate.py --epochs 1
-```
-
-Read the reported minutes-per-epoch and budget from **your measured number**,
-not from an estimate. Published CPU throughput for YOLOv8n varies about 3x
-across reports, which is exactly why this step exists.
-
-| Measured | Do this |
+| Setting | Value |
 |---|---|
-| **< 15 min/epoch** | `epochs = floor(available_hours * 60 / minutes_per_epoch)`, capped at 60 |
-| **15-25 min/epoch** | Re-prepare at `--subset 2000`, retrain with `--imgsz 416`, re-calibrate |
-| **> 25 min/epoch** | Local no longer fits. Move this one job to Kaggle (`--device 0` in a notebook, ~30 min) and bring the weights back |
+| Accelerator | **GPU T4 x2** (or P100) |
+| Internet | **On** — needed for `pip install` and the repo clone |
+| Add Data | your plate dataset |
 
-### Launch the real run in the background
+Set `SRC` in the first code cell to the attached dataset path
+(`/kaggle/input/<slug>`), then Run All.
+
+The notebook clones this repo and calls `ml/prepare_dataset.py` and
+`ml/train_plate.py` — no training code is duplicated in the notebook, so the
+Kaggle path and the local path can never drift apart.
+
+**Expect ~20-40 s/epoch. 50 epochs is roughly 20-35 minutes.**
+
+GPU defaults are `imgsz=640, batch=32, amp=True, freeze=0`. Note `freeze=0` —
+the backbone is *not* frozen. Freezing it is a CPU concession that costs
+accuracy, and on a T4 there is no reason to pay it.
+
+Kaggle allows 12 h per session and 30 h/week, so there is ample headroom. If a
+session dies, re-run the setup cells and add `--resume`.
+
+### 3. Bring the weights back
+
+Download `argus-plate-weights.zip` from the notebook's Output panel, then
+locally:
 
 ```bash
-nohup nice -n 10 python ml/train_plate.py \
-      --epochs <N> --workers 6 --patience 15 > ml/train.log 2>&1 &
+mkdir -p runs/detect/plate/weights
+unzip argus-plate-weights.zip -d runs/detect/plate/weights
+python ml/export_onnx.py --weights runs/detect/plate/weights/best.pt
 ```
 
-`nice -n 10` and `--workers 6` leave ~4 threads free so the laptop stays usable
-for backend work. It lengthens the run maybe 20-30%; take that trade.
-
-Check with `tail -f ml/train.log`. **Do not wait on it.** Go to Stage 2.
-
-If the run dies: `python ml/train_plate.py --resume`.
-
-**Go/no-go bar:** `mAP50 >= 0.85` on val. Single-class, tight-boxed plates reach
-this readily. If it stalls below 0.7, the dataset conversion is wrong, not the
+**Go/no-go bar: `mAP50 >= 0.85` on val.** Single-class, tight-boxed plates reach
+this readily. If it stalls below 0.7 the dataset conversion is wrong, not the
 training — check that labels are class `0` and boxes are normalized `xywh`.
+
+Since a GPU run is cheap, if the first result disappoints, raise `SUBSET`
+toward the full 15,000 images and re-run. That option did not exist on CPU.
+
+### Local fallback — only if Kaggle is unavailable
+
+```bash
+python ml/prepare_dataset.py --src <dataset> --subset 3000 --val 400
+python ml/train_plate.py --cpu --epochs 1        # calibration — read the time
+nohup nice -n 10 python ml/train_plate.py --cpu --epochs <N> > ml/train.log 2>&1 &
+```
+
+`--cpu` flips a whole preset: `imgsz=480`, frozen backbone, `workers=6` so the
+laptop stays usable. Budget epochs from the **measured** minutes-per-epoch the
+calibration run prints, not from an estimate — published CPU throughput for
+YOLOv8n varies about 3x across reports. The script prints the recommendation
+itself.
 
 ---
 
-## Stage 2 — Freeze the API contract
+## Stage 2 — The API contract is already frozen
 
-**Both devs together, hours 0-2. Nothing else starts until this is done.**
+**Done. Both developers start from here.**
 
-Write `API-Contract.md` in the wiki: every REST endpoint, every WebSocket
-message shape, exactly. Then Dev A stubs `/api/mock/*` returning fixture JSON
-in those shapes.
+[[API-Contract]] specifies every REST endpoint and WebSocket message shape, and
+`backend/mock.py` already serves all of them from seeded fixtures:
 
-From that moment Dev B is unblocked permanently and never waits on the backend.
-In a 2-person split this is the highest-leverage 90 minutes of the entire
-build — without it the frontend serializes behind the backend for 20 hours.
+```bash
+pip install -r backend/requirements.txt
+uvicorn backend.mock:app --reload --port 8000
+python backend/mock.py            # fixture selfcheck, no server needed
+```
 
-Response shapes are frozen. Changing one is a contract change: announce it.
+Every route and all four WebSocket message types are smoke-tested. Fixtures are
+seeded with `Random(0)`, so reloads give identical data — a chart that
+reshuffles on refresh makes it impossible to tell a UI bug from new data.
+
+The frontend reads one constant:
+
+```ts
+export const API = import.meta.env.VITE_API_URL +
+  (import.meta.env.VITE_MOCK ? "/api/mock" : "/api");
+```
+
+Switching the whole frontend from fixtures to live data is one environment
+variable. That is the point.
+
+The fixtures deliberately include the cases that break naive UIs:
+
+- ~15% of tracks have `plate_text: null` — Re-ID-only matching is exactly what
+  Act 2 of the demo shows off, so the UI must render it
+- `GET /search` on an unknown plate returns **200 with empty arrays**, not 404
+- one camera reports `status: "degraded"`
+- hops carry `method` of `plate`, `reid`, or `spatial_temporal`, so the map can
+  colour by which matching layer confirmed each leg
+- `KA05MR7821` is a known-good plate that search will always find — use it in
+  rehearsal
+
+**Response shapes are frozen. Changing one is a contract change: announce it.**
 
 ---
 
@@ -162,7 +217,8 @@ per-frame does not.
 
 ## Stage 4 — Swap in the trained model
 
-**Dev A, hour ~20, or whenever training finishes.**
+**Dev A, whenever the Kaggle weights land — likely early, since the run is
+~30 min rather than overnight.**
 
 ```bash
 python ml/export_onnx.py --weights runs/detect/plate/weights/best.pt
@@ -200,10 +256,12 @@ cut `imgsz` before cutting features.**
 |---|---|
 | Infra only (usual dev mode) | `docker compose up -d db redis` |
 | Whole stack | `docker compose up -d` |
-| Backend dev server | `uvicorn backend.main:app --reload` |
+| Real backend dev server | `uvicorn backend.main:app --reload` |
 | Frontend dev server | `cd frontend && npm run dev` |
-| Check training progress | `tail -f ml/train.log` |
-| Resume a dead training run | `python ml/train_plate.py --resume` |
+| Mock API (works today) | `uvicorn backend.mock:app --reload --port 8000` |
+| Verify mock fixtures | `python backend/mock.py` |
+| Check a local fallback run | `tail -f ml/train.log` |
+| Resume a dead Kaggle run | re-run setup cells, then `--resume` |
 | Run pipeline on one video | `python -m backend.pipeline --source demo/cam1.mp4 --camera CAM1` |
 | Re-apply DB schema | `psql "$DATABASE_URL" -f db/schema.sql` |
 | Verify dataset prep logic | `python ml/prepare_dataset.py --selfcheck` |
