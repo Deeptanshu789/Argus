@@ -308,7 +308,7 @@ class _Track:
     an OCR attempt, which crop is the best one, and what gets emitted on exit."""
 
     __slots__ = ("track_id", "vehicle_type", "entry_time", "last_seen_frame",
-                 "frames", "attempts", "best_area", "plate_text", "plate_conf",
+                 "frames", "attempts", "best_area", "votes",
                  "embedding", "colour", "colour_hist")
 
     def __init__(self, track_id: str, vehicle_type: str, ts: str, frame_no: int):
@@ -319,15 +319,38 @@ class _Track:
         self.frames = 0
         self.attempts = 0
         self.best_area = 0.0
-        self.plate_text: str | None = None
-        self.plate_conf: float | None = None
+        # Every accepted read for this track, not just the best one. A vehicle
+        # gets several OCR attempts as it crosses the frame; those reads fail
+        # INDEPENDENTLY -- a smudge that turns 8 into B on one frame is gone on
+        # the next -- while the correct string repeats. Two agreeing reads are
+        # worth more than one confident one, and picking by confidence alone
+        # throws that away. See plate() below.
+        self.votes: dict[str, list[float]] = {}
         self.embedding: list[float] = []
         self.colour: str | None = None
         self.colour_hist: list[float] = []
 
+    def record(self, plate: str, conf: float | None) -> None:
+        self.votes.setdefault(plate, []).append(conf if conf is not None else 0.0)
+
+    def plate(self) -> tuple[str | None, float | None]:
+        """The winning read: most votes first, mean confidence as tie-break.
+
+        Confidence reported is the mean of the votes for the winner, so a plate
+        agreed on twice at 0.8 outranks a single 0.95 -- which is the right
+        ordering, because a repeated reading is evidence and a lone one is not.
+        """
+        if not self.votes:
+            return None, None
+        best = max(self.votes.items(),
+                   key=lambda kv: (len(kv[1]), sum(kv[1]) / len(kv[1])))
+        return best[0], round(sum(best[1]) / len(best[1]), 3)
+
     def wants_ocr(self, area: float) -> bool:
-        if self.plate_conf is not None and self.plate_conf >= 0.9:
-            return False                       # already confident; stop paying
+        # Stop once two attempts have AGREED. One confident read is not enough
+        # to stop on: the confident wrong reads are exactly the dangerous ones.
+        if any(len(v) >= 2 for v in self.votes.values()):
+            return False
         if self.attempts >= PLATE_MAX_ATTEMPTS:
             return False
         return self.frames <= PLATE_FIRST_FRAMES or area > self.best_area * PLATE_GROWTH
@@ -521,10 +544,11 @@ def run(camera: str, source: str, fps: int, loop: bool = False) -> None:
             print(f"track {key} closed with no ReID feature ({why}); dropped",
                   file=sys.stderr)
             return
+        plate_text, plate_conf = t.plate()
         emit(event="track_closed", camera_id=camera, track_id=t.track_id,
              entry_time=t.entry_time, exit_time=now_iso(),
              vehicle_type=t.vehicle_type, color=t.colour,
-             plate_text=t.plate_text, plate_conf=t.plate_conf,
+             plate_text=plate_text, plate_conf=plate_conf,
              embedding=embedding, color_hist=t.colour_hist or [0.0] * 32)
 
     while True:
@@ -608,8 +632,8 @@ def run(camera: str, source: str, fps: int, loop: bool = False) -> None:
                 if t.wants_ocr(area):
                     t.attempts += 1
                     plate, plate_conf = _read_plate(reader, plate_model, crop)
-                    if plate and (t.plate_conf is None or (plate_conf or 0) > t.plate_conf):
-                        t.plate_text, t.plate_conf = plate, plate_conf
+                    if plate:
+                        t.record(plate, plate_conf)
 
         if feats := features:
             for key in list(tracks):
@@ -710,8 +734,26 @@ def _selfcheck() -> None:
     assert t.wants_ocr(200.0), "a crop that doubled means the vehicle came closer"
     t.attempts = PLATE_MAX_ATTEMPTS
     assert not t.wants_ocr(10_000.0), "the per-track attempt ceiling must hold"
-    t.attempts, t.plate_conf = 0, 0.95
-    assert not t.wants_ocr(10_000.0), "a confident read must stop further attempts"
+
+    # Voting. Two agreeing reads beat one more-confident read, because OCR
+    # errors on a moving vehicle are independent and the truth repeats.
+    v = _Track("2", "car", now_iso(), 0)
+    v.record("KA01MB1234", 0.80)
+    v.record("KA01MB1284", 0.95)
+    v.record("KA01MB1234", 0.82)
+    plate, conf = v.plate()
+    assert plate == "KA01MB1234", f"majority must win, got {plate}"
+    assert abs(conf - 0.81) < 1e-6, conf
+    assert not v.wants_ocr(10_000.0), "two agreeing reads must stop further attempts"
+
+    single = _Track("3", "car", now_iso(), 0)
+    single.frames, single.best_area = 50, 100.0
+    single.record("KA01MB1234", 0.99)
+    assert single.plate()[0] == "KA01MB1234"
+    assert single.wants_ocr(10_000.0), \
+        "ONE confident read must NOT stop attempts -- confident wrong reads are " \
+        "exactly the dangerous ones, and a second look is what catches them"
+    assert _Track("4", "car", now_iso(), 0).plate() == (None, None)
 
     # emit() must write to the protocol channel, NOT to sys.stdout — that is the
     # whole point of the split, and a regression here silently corrupts the
