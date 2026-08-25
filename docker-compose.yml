@@ -1,7 +1,12 @@
-# Argus — full stack. `docker compose up -d` brings everything up.
-# During the build most work happens against `up -d db redis` plus a local
-# `uvicorn --reload` / `npm run dev`; the backend/frontend services here are for
-# the demo machine and for judges.
+# Argus — full stack.
+#
+#   docker compose up -d db redis     # usual dev mode; app runs on the host
+#   docker compose up -d              # everything, for the demo machine
+#
+# `app` is the Next.js custom server: UI, /api route handlers, and the /ws
+# upgrade in one process. `worker` supervises the Python inference sidecars —
+# the only place Python runs at runtime — and is separate on purpose: decoding
+# video pins a CPU core and would stall the dashboard if it shared a process.
 
 services:
   db:
@@ -27,41 +32,40 @@ services:
       interval: 5s
       retries: 10
 
-  backend:
-    build: ./backend
+  app:
+    image: node:22-slim
+    working_dir: /app
     environment:
       DATABASE_URL: postgresql://argus:argus@db:5432/argus
       REDIS_URL: redis://redis:6379/0
-    ports: ["8000:8000"]
+      PORT: "3000"
+    ports: ["3000:3000"]
     volumes:
-      - ./backend:/app
-      - ./ml:/app/ml:ro
-      - ./demo:/app/demo:ro
+      - .:/app
+      - node_modules:/app/node_modules
     depends_on:
-      db: {condition: service_healthy}
-      redis: {condition: service_healthy}
-    command: uvicorn main:app --host 0.0.0.0 --port 8000
+      db: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    command: sh -c "npm ci && npm run build && npm start"
 
+  # Node supervisor + Python sidecars share this container: the supervisor
+  # spawns `python ml/sidecar.py` as a child process, so they must co-locate.
   worker:
-    build: ./backend
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
     environment:
       DATABASE_URL: postgresql://argus:argus@db:5432/argus
       REDIS_URL: redis://redis:6379/0
+      ARGUS_PYTHON: python3
+      ARGUS_CAMERAS: CAM1=demo/cam1.mp4,CAM2=demo/cam2.mp4,CAM3=demo/cam3.mp4,CAM4=demo/cam4.mp4
     volumes:
-      - ./backend:/app
-      - ./ml:/app/ml:ro
-      - ./demo:/app/demo:ro
+      - .:/app
+      - node_modules:/app/node_modules
     depends_on:
-      backend: {condition: service_started}
-    command: celery -A tasks worker --loglevel=info --concurrency=2
-
-  frontend:
-    build: ./frontend
-    environment:
-      VITE_API_URL: http://localhost:8000
-    ports: ["5173:5173"]
-    depends_on: [backend]
-    command: npm run dev -- --host 0.0.0.0
+      app: { condition: service_started }
+    command: npm run worker
 
 volumes:
   pgdata:
+  node_modules:

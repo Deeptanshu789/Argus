@@ -1,0 +1,42 @@
+{
+  "name": "argus",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "dev": "tsx watch server.ts",
+    "build": "next build",
+    "start": "NODE_ENV=production tsx server.ts",
+    "worker": "tsx watch worker/ingest.ts",
+    "check": "tsc --noEmit",
+    "selfcheck": "tsx src/server/mock.selfcheck.ts",
+    "db:push": "drizzle-kit push"
+  },
+  "dependencies": {
+    "@deck.gl/aggregation-layers": "^9.0.0",
+    "@deck.gl/geo-layers": "^9.0.0",
+    "@deck.gl/layers": "^9.0.0",
+    "@deck.gl/react": "^9.0.0",
+    "bullmq": "^5.0.0",
+    "drizzle-orm": "^0.36.0",
+    "ioredis": "^5.4.0",
+    "maplibre-gl": "^4.7.0",
+    "next": "^15.0.0",
+    "postgres": "^3.4.0",
+    "react": "^18.3.0",
+    "react-dom": "^18.3.0",
+    "react-map-gl": "^7.1.0",
+    "recharts": "^2.13.0",
+    "ws": "^8.18.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^18.3.0",
+    "@types/ws": "^8.5.0",
+    "drizzle-kit": "^0.28.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}

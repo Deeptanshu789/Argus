@@ -1,11 +1,22 @@
 # Argus — Project Construction, Training Plan, and Wiki Publish
 
-> **Superseded in one respect (2026-08-25):** training moved from strictly-local
-> CPU to **Kaggle GPU**. The local CPU path survives as a fallback behind
-> `ml/train_plate.py --cpu`. Everything else in this document still stands —
-> notably that **inference is still CPU**, so the OpenVINO export, the 5 FPS
-> budget, and the sparse OCR / Re-ID scheduling all still apply. Current
-> instructions live in `WORKFLOW.md` and the wiki's Model-Training page.
+> **HISTORICAL SNAPSHOT — two decisions have since changed (2026-08-25).**
+> Kept for the reasoning, not as instructions. Current instructions live in
+> `CLAUDE.md`, `WORKFLOW.md`, and the wiki.
+>
+> 1. **Training moved from local CPU to Kaggle GPU.** The local path survives
+>    behind `ml/train_plate.py --cpu`.
+> 2. **The stack is now TypeScript.** Next.js 15 App Router serves the UI, the
+>    REST handlers and the WebSocket hub in one process; Drizzle replaces
+>    SQLAlchemy, BullMQ replaces Celery, and FastAPI is gone. Python is
+>    quarantined to `ml/`: training, plus one inference sidecar per camera that
+>    emits newline-delimited JSON to a Node supervisor.
+>
+> What still stands, and is the reason most of this document is still worth
+> reading: **inference is still CPU-only**, so the OpenVINO export, the 5 FPS
+> budget, sparse OCR and Re-ID-on-exit all apply unchanged — and the three-layer
+> cross-camera matching engine, the 2-of-3 confirmation rule, and the two-person
+> split with a frozen contract as the seam are all unchanged in substance.
 
 ## Context
 

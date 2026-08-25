@@ -1,0 +1,11 @@
+# Python exists in this project for exactly two things:
+#   1. training the plate detector (on Kaggle, not here)
+#   2. the inference sidecar (ml/sidecar.py), which emits JSON to the Node worker
+# Everything else -- API, WebSocket, association, analytics, UI -- is TypeScript.
+ultralytics>=8.3
+paddleocr>=2.7
+paddlepaddle>=2.6
+torchreid>=1.4
+opencv-python-headless>=4.9
+openvino>=2024.0
+numpy>=1.26

@@ -1,4 +1,0 @@
-# Mock API only needs these two. The real pipeline adds ultralytics, paddleocr,
-# torchreid, opencv-python, openvino, psycopg2-binary, redis, celery.
-fastapi>=0.110
-uvicorn[standard]>=0.27
