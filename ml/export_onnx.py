@@ -7,15 +7,25 @@ ONNX is the fallback when OpenVINO chokes on a layer.
 
     python ml/export_onnx.py --weights runs/detect/plate/weights/best.pt
 
-INT8 NEEDS CALIBRATION DATA. Quantisation measures real activation ranges on
-real images; there is no way to do it without them. Training happens on Kaggle
-and export usually happens on the laptop, so the dataset is often not here --
-this script says so plainly instead of dying inside ultralytics.
+USE --fp32 UNLESS YOU HAVE MEASURED A NEED FOR MORE.
 
-Two ways out, in order of preference:
-  1. Export on Kaggle, where the dataset already is, and download the IR folder.
-  2. --fp32 here. Works with no data at all, roughly 2x slower than int8 and
-     about 4x the file size. Fine for correctness work, not for the demo.
+Measured on the build machine (AMD Ryzen AI 7 350, 16 threads, imgsz 480):
+
+    PyTorch CPU      17 ms/frame
+    OpenVINO fp32     9 ms/frame
+
+The budget is 4 streams x 5 FPS = 20 inferences/sec, i.e. 50 ms per inference.
+fp32 already clears that by more than 5x. int8 buys roughly another 2x on a
+number that is not the bottleneck -- so it is an optimisation to reach for if
+end-to-end FPS actually misses, not a prerequisite.
+
+That matters because int8 NEEDS CALIBRATION DATA: quantisation measures real
+activation ranges on real images, and there is no way to do it from the weights
+alone. Training happens on Kaggle and export happens on the laptop, so the
+dataset is usually in the wrong place. --fp32 needs nothing but the weights.
+
+If you do want int8 later, export on Kaggle where the dataset already is and
+download the IR folder.
 
 ponytail: ceiling is CPU int8, 480px, 4 streams @ 5 FPS. Upgrade path is the
 amdxdna NPU at /dev/accel/accel0 (Linux stack still immature) or any CUDA box at

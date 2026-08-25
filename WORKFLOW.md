@@ -122,15 +122,22 @@ there is no reason to pay it.
 ```bash
 mkdir -p runs/detect/plate/weights
 unzip ~/Downloads/argus-plate-weights.zip -d runs/detect/plate/weights
-unzip ~/Downloads/argus-plate-openvino.zip -d runs/detect/plate/weights/best_openvino_model
 ```
 
-> **Export int8 on Kaggle, not here.** Quantisation measures activation ranges
-> on real images, so it needs the dataset — which lives on Kaggle, not on the
-> laptop. The notebook's last cell does the export and zips the IR. Running
-> `ml/export_onnx.py` locally without the dataset now fails with that
-> explanation rather than dying inside ultralytics. `--fp32` works with no data
-> at all but gives up roughly 2x of the speedup.
+> **Use `--fp32`.** Measured on the build machine at imgsz 480: PyTorch CPU
+> 17 ms/frame, OpenVINO fp32 9 ms/frame. The budget is 4 streams x 5 FPS = 20
+> inferences/sec, i.e. 50 ms per inference, so fp32 clears it by more than 5x.
+> int8 buys roughly another 2x on a number that is not the bottleneck.
+>
+> That matters because int8 needs calibration images — quantisation measures
+> activation ranges on real data and cannot work from weights alone — and the
+> dataset lives on Kaggle, not on the laptop. `--fp32` needs nothing but the
+> weights. Reach for int8 only if end-to-end FPS actually misses.
+
+```bash
+./.venv/bin/python ml/export_onnx.py \
+    --weights runs/detect/plate/weights/best.pt --fp32
+```
 
 **Go/no-go bar: `mAP50 >= 0.85` on val.** Below 0.7 means the dataset conversion
 is wrong, not the training — check labels are class `0` and boxes normalized
