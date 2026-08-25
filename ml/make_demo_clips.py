@@ -24,18 +24,52 @@ import sys
 from pathlib import Path
 
 FPS = 25
-SECONDS_PER_VEHICLE = 4
+# How long a vehicle takes to cross the frame. This is not a cosmetic choice.
+#
+# Association at 5 FPS works on box overlap between CONSECUTIVE PROCESSED
+# frames. A vehicle that crosses a 960 px frame in 4 s moves ~60 px per
+# processed frame; at a typical 110 px box that is an IoU of 0.28, below what
+# BoT-SORT will match, and every frame starts a new track. 10 s puts it at
+# ~24 px, an IoU near 0.65, which matches comfortably.
+#
+# Ten seconds is also what real footage looks like: a vehicle at 30 km/h
+# covers a 25 m field of view in about 3 s, and an ANPR camera watches a
+# longer stretch than that.
+SECONDS_PER_VEHICLE = 10
 W, H = 960, 540
 
-# Which cameras each vehicle is seen by, and how many seconds into the clip.
-# Vehicle 0 travels CAM1 -> CAM3 -> CAM2, matching the road graph seeded by
-# db/setup.ts, so layer 3 has a link to check the timing against.
-ROUTE = {
-    "cam1": [(0, 0), (1, 5), (3, 10)],
-    "cam3": [(0, 4), (2, 8)],
-    "cam2": [(0, 9), (1, 13)],
-    "cam4": [(2, 2), (3, 6)],
+# Which vehicle appears on which camera, and how many seconds into the clip.
+#
+# THE OFFSETS ARE THE ROAD GRAPH. db/setup.ts seeds CAM1->CAM3 at 168 s and
+# CAM1->CAM2 at 200 s, and layer 3 of the association engine accepts a match
+# only within 0.5x-2.0x of that. Staging the same vehicle 4 s apart on two
+# cameras does not make an easy match — it makes an IMPOSSIBLE one, which the
+# engine correctly vetoes, and the fixture then proves nothing.
+#
+# So vehicle 0 leaves CAM1 at t=5, reaches CAM3 at t=173 (168 s later) and CAM2
+# at t=205 (200 s later). Every sidecar starts at once and runs in real time, so
+# clip time IS wall-clock time between cameras.
+LEG_CAM1_CAM3 = 168
+LEG_CAM1_CAM2 = 200
+FILLER_EVERY = 24          # unrelated traffic, so the clips are not empty road
+
+# The tracked vehicle. Exactly these three appearances, nowhere else.
+TRACKED = {
+    "cam1": [(0, 5)],
+    "cam3": [(0, 5 + LEG_CAM1_CAM3)],
+    "cam2": [(0, 5 + LEG_CAM1_CAM2)],
+    "cam4": [],            # never on vehicle 0's route: a true negative
 }
+
+# Filler traffic, so the clips are not empty road between the three moments
+# that matter. Vehicle 0 is EXCLUDED from it: a second, unscheduled appearance
+# of the tracked vehicle would give the association engine a real ambiguity
+# to resolve, and the fixture could then no longer say what a match proves.
+ROUTE = {cam: list(passes) for cam, passes in TRACKED.items()}
+for _cam, _first in (("cam1", 1), ("cam3", 2), ("cam2", 3), ("cam4", 1)):
+    for _n in range(9):
+        _idx = 1 + (_first + _n) % 3          # 1, 2 or 3 — never 0
+        ROUTE[_cam].append((_idx, _n * FILLER_EVERY + 12))
 
 
 def road_background():
@@ -77,7 +111,10 @@ def main() -> None:
         # Scale so the vehicle occupies a plausible slice of the frame. Too
         # large and the plate is trivially readable; too small and OCR has
         # nothing to work with at any distance.
-        scale = (H * 0.45) / img.shape[0]
+        # The photo is a whole scene, so the car inside it is smaller than the
+        # pasted region. Scale generously: a plate must be readable, which on a
+        # real ANPR camera means the vehicle fills a good part of the frame.
+        scale = (H * 0.8) / img.shape[0]
         vehicles.append(cv2.resize(img, None, fx=scale, fy=scale))
     print(f"vehicles: {', '.join(p.name for p in photos)}")
 

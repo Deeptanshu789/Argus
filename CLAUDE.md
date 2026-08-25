@@ -95,6 +95,25 @@ weights are a one-line swap at a single call site.
 threads clears that. Per-frame OCR or Re-ID does not. If FPS misses, **cut
 `imgsz` before cutting features.**
 
+### 5 FPS has a floor, and it is the tracker
+
+Association matches a track to a detection by box overlap between *consecutive
+processed frames*, and `fuse_score` folds the detection score into the cost. A
+vehicle that moves too far between frames is never matched, so a **new track
+starts every frame and none is ever confirmed** — `boxes.id` stays `None` and
+the sidecar emits nothing at all. Measured:
+
+| box width | movement per processed frame | IoU | tracked frames |
+|---|---|---|---|
+| 107 px | 60 px | 0.28 | **0 of 16** |
+| 256 px | 28 px | 0.65 | 117 of 123 |
+
+Rule of thumb: **a vehicle must move less than about half its own box width per
+processed frame.** If real footage fragments into many short tracks, raise
+`--fps` before touching thresholds. Fragmentation is worse than it looks —
+Module C computes one Re-ID embedding per track, so a vehicle split six ways
+gives six weak embeddings instead of one good one.
+
 ## Ownership
 
 | | Dev A | Dev B |

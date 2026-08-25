@@ -103,11 +103,15 @@ async function flush() {
 // --------------------------------------------------------------- sidecars --
 
 function start(cam: { id: string; source: string }): ChildProcess {
-  const proc = spawn(
-    PYTHON,
-    ["ml/sidecar.py", "--camera", cam.id, "--source", cam.source, "--fps", "5"],
-    { stdio: ["ignore", "pipe", "pipe"] },
-  );
+  // A video FILE that ends is not a camera that failed. Loop it in the sidecar
+  // rather than letting it exit and restart: a restart reloads YOLO, the plate
+  // detector and PaddleOCR, which is ~20 s of dead air in the middle of a demo.
+  // A live stream never ends, so the flag costs it nothing.
+  const isStream = cam.source === "demo" || /^(rtsp|rtmp|https?):\/\//.test(cam.source);
+  const args = ["ml/sidecar.py", "--camera", cam.id, "--source", cam.source, "--fps", "5"];
+  if (!isStream) args.push("--loop");
+
+  const proc = spawn(PYTHON, args, { stdio: ["ignore", "pipe", "pipe"] });
 
   createInterface({ input: proc.stdout! }).on("line", (line) => {
     if (!line.trim()) return;

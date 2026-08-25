@@ -6,6 +6,22 @@
 
 tracker_type: botsort
 
+# THE FRAME-RATE CONSTRAINT, measured.
+#
+# Association matches a track to a detection by box overlap between CONSECUTIVE
+# PROCESSED frames. At 5 FPS a vehicle moves a long way between them, and
+# `fuse_score` multiplies the detection score into the cost, so a moderate
+# detection at low overlap is rejected outright.
+#
+#   box 107 px, moving 60 px/frame  -> IoU 0.28 -> no track EVER activates
+#   box 256 px, moving 28 px/frame  -> IoU 0.65 -> 117 ids over 123 frames
+#
+# Rule of thumb: a vehicle must move less than about half its own box width per
+# processed frame. If real footage shows tracks fragmenting into many short
+# ones, RAISE --fps before touching anything here — fragmentation is worse than
+# it looks, because Module C computes its Re-ID embedding per track, and a
+# vehicle split into six tracks gives six weak embeddings instead of one good
+# one.
 track_high_thresh: 0.25
 track_low_thresh: 0.1
 new_track_thresh: 0.25
@@ -18,6 +34,16 @@ fuse_score: True
 
 # Global motion compensation corrects for a MOVING camera. Ours are bolted to
 # poles. sparseOptFlow is pure wasted CPU here, and CPU is the whole budget.
+#
+# Measured on demo/cam1.mp4: none and sparseOptFlow both give 117 ids over 123
+# detected frames. Disabling it costs nothing on a static camera.
+#
+# BUT: on an earlier fixture where vehicles crossed the frame in 4 s, `none`
+# gave ZERO ids and sparseOptFlow gave 14 — because with one large fast object
+# on a low-texture background the "camera motion" it estimates IS the object's
+# motion, so it shifted predictions onto the vehicle by accident. If you ever
+# see tracking collapse when GMC is off, the cause is the association gate
+# below, not GMC. See the frame-rate note.
 gmc_method: none
 
 # ReID: this is what produces the embedding Module C compares across cameras.

@@ -393,6 +393,13 @@ def run(camera: str, source: str, fps: int, loop: bool = False) -> None:
     features: dict[str, list[float]] = {}
     processed = 0
     raw_no = 0
+    # A track that never activates emits NOTHING, silently -- see the frame-rate
+    # note in ml/botsort.yaml. Counting the two separately makes that visible
+    # instead of looking like "the detector found no vehicles".
+    frames_with_boxes = 0
+    frames_with_ids = 0
+    warned_no_ids = False
+    started = time.monotonic()
 
     def close(key: str, why: str) -> None:
         t = tracks.pop(key, None)
@@ -425,6 +432,17 @@ def run(camera: str, source: str, fps: int, loop: bool = False) -> None:
         if raw_no % step:
             continue
         processed += 1
+
+        # Pace to the target rate. A file decodes as fast as the CPU allows, so
+        # without this a 200 s clip is consumed in 30 s while timestamps come
+        # from the wall clock -- which compresses the timeline, and layer 3 then
+        # sees a vehicle reach the next camera in 4 s against a 168 s link and
+        # correctly rejects a match that really happened. A live stream delivers
+        # frames at its own rate and never waits here.
+        behind = started + processed / max(fps, 1) - time.monotonic()
+        if behind > 0:
+            time.sleep(behind)
+
         ts = now_iso()
 
         result = vehicle_model.track(
@@ -442,6 +460,20 @@ def run(camera: str, source: str, fps: int, loop: bool = False) -> None:
 
         seen: set[str] = set()
         boxes = result.boxes
+        if boxes is not None and len(boxes):
+            frames_with_boxes += 1
+            if boxes.id is not None:
+                frames_with_ids += 1
+        # Vehicles are being DETECTED but no track is ever confirmed. Nothing
+        # downstream can work, and without this warning the sidecar just looks
+        # like an empty road. Almost always the frame rate: see ml/botsort.yaml.
+        if (not warned_no_ids and frames_with_boxes >= 20 and frames_with_ids == 0):
+            warned_no_ids = True
+            print(f"WARNING: {frames_with_boxes} frames with vehicles and NOT ONE "
+                  f"confirmed track. Association is failing every frame — vehicles "
+                  f"are almost certainly moving too far between processed frames. "
+                  f"Raise --fps (currently {fps}). See ml/botsort.yaml.",
+                  file=sys.stderr)
         if boxes is not None and boxes.id is not None:
             for box in boxes:
                 key = str(int(box.id[0]))
@@ -485,7 +517,8 @@ def run(camera: str, source: str, fps: int, loop: bool = False) -> None:
     # cross-camera match may be the one the demo is about to show.
     for key in list(tracks):
         close(key, "end of stream")
-    print(f"[{camera}] {processed} frames processed", file=sys.stderr)
+    print(f"[{camera}] {processed} frames processed, {frames_with_boxes} with "
+          f"vehicles, {frames_with_ids} with confirmed tracks", file=sys.stderr)
 
 
 def main() -> None:
