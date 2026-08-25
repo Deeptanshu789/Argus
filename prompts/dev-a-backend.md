@@ -26,8 +26,12 @@ Sanity check: `curl localhost:3000/api/mock/cameras` returns four cameras, and
 Python venv, only when you start the sidecar:
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r ml/requirements.txt
+sudo dnf -y install python3.12       # NOT 3.13 — paddlepaddle has no 3.13 wheels
+python3.12 -m venv .venv
+# CPU torch FIRST: PyPI's default wheel bundles ~2.5 GB of CUDA runtime that
+# cannot run on this machine. The CPU wheel is ~200 MB.
+./.venv/bin/pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
+./.venv/bin/pip install -r ml/requirements.txt
 ```
 
 ## What already exists — do not rebuild it
@@ -124,15 +128,22 @@ passing selfcheck. Fill in the pipeline:
 - PaddleOCR on the plate crop, then `correct_plate()` — already written and
   tested. **Do not skip the correction pass**; it is worth more than model
   fine-tuning on Indian plates.
-- ByteTrack within the camera.
-- OSNet (`torchreid`, pretrained `osnet_x1_0` — **do not train it**) for a
-  512-dim embedding, on track exit.
+- Tracking and Re-ID in **one** pass: `model.track(frame, persist=True,
+  tracker="ml/botsort.yaml", classes=[2,3,5,7])`. BoT-SORT with
+  `with_reid: True` gives stable ids *and* appearance features. Do not add a
+  second model, and do not reach for `torchreid` — the PyPI package of that
+  name is an unofficial fork stuck at 0.2.5 and will not install.
+- Emit the embedding on **track exit only**. Its dimension is whatever the ReID
+  model produces — do not assume 512. Every camera must emit the same
+  dimension; `worker/ingest.ts` enforces that and says so loudly, because a
+  mismatch makes cosine similarity return 0 and layer 2 silently stop firing.
 - `emit()` `detection` and `track_closed` events. **Stdout is JSON only** —
   diagnostics go to stderr, or the supervisor logs a contract violation.
 
 **Acceptance:** `python ml/sidecar.py --camera CAM1 --source demo/cam1.mp4`
-prints valid JSON lines, one `track_closed` per completed track with a 512-float
-embedding, and `python ml/sidecar.py --selfcheck --camera X --source X` passes.
+prints valid JSON lines, one `track_closed` per completed track carrying an
+embedding, the worker logs one `embedding dimension: N` and never a mismatch,
+and `python ml/sidecar.py --selfcheck --camera X --source X` passes.
 
 ### 2. `worker/ingest.ts` — fill in `handle()`
 

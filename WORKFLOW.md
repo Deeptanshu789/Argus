@@ -66,9 +66,18 @@ Python, only for the sidecar (Dev A only, and only when starting Module A).
 
 ```bash
 sudo dnf -y install python3.12
-python3.12 -m venv .venv && source .venv/bin/activate
-pip install -r ml/requirements.txt
+python3.12 -m venv .venv
+# CPU torch FIRST. PyPI's default wheel bundles ~2.5 GB of CUDA runtime that
+# cannot run on this machine; the CPU wheel is ~200 MB.
+./.venv/bin/pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
+./.venv/bin/pip install -r ml/requirements.txt
 ```
+
+> **There is no installable `torchreid`.** The PyPI package of that name is an
+> unofficial fork stuck at 0.2.5 (`ERROR: No matching distribution found for
+> torchreid>=1.4`), and the real deep-person-reid needs a source build.
+> Ultralytics BoT-SORT (`ml/botsort.yaml`) provides tracking *and* Re-ID
+> embeddings from a dependency the project needs anyway.
 
 `ARGUS_PYTHON` in `.env.local` must point at that interpreter (`.venv/bin/python`).
 `ffmpeg` is also required for video decode; Fedora 42 ships it already.

@@ -19,7 +19,7 @@ Event types, one JSON object per line on stdout:
    "conf":...,"vehicle_type":...}
   {"event":"track_closed","camera_id":...,"track_id":...,"entry_time":...,
    "exit_time":...,"vehicle_type":...,"color":...,"plate_text":...,"plate_conf":...,
-   "embedding":[...512 floats...],"color_hist":[...]}
+   "embedding":[...floats, same length on every camera...],"color_hist":[...]}
   {"event":"error","camera_id":...,"detail":...}
 
 Diagnostics go to stderr. Anything non-JSON on stdout is a bug.
@@ -113,8 +113,9 @@ DEMO_PLATE = "KA05MR7821"
 
 def _demo_embedding(seed: int) -> list[float]:
     """Deterministic 512-dim vector. Same vehicle -> near-identical vectors, so
-    layer 2 of the association engine fires exactly as it would on real OSNet
-    output."""
+    layer 2 of the association engine fires exactly as it would on real tracker
+    output. 512 here is arbitrary: what matters is that every demo sidecar
+    agrees, which is the same rule the real ones follow."""
     import math
     return [round(math.sin((i + 1) * 0.017 + seed), 6) for i in range(512)]
 
@@ -167,14 +168,16 @@ def run(camera: str, source: str, fps: int) -> None:
 
     Sketch, in the order things happen:
         cap = cv2.VideoCapture(source); skip frames to hit `fps`
-        boxes = vehicle_model(frame)              # stock yolov8n, COCO classes
-        tracks = bytetrack.update(boxes)          # every processed frame
+        # model.track(persist=True, tracker="ml/botsort.yaml") gives boxes,
+        # stable ids AND ReID features in one pass -- do not run a second model.
+        results = vehicle_model.track(frame, persist=True,
+                                      tracker="ml/botsort.yaml", classes=[2,3,5,7])
         for t in tracks.new_or_low_conf_plate:    # NOT every frame
             crop = best_crop(t); clahe(crop)
             plate_raw = ocr(plate_model(crop))
             t.plate, penalty = correct_plate(plate_raw)
         for t in tracks.just_exited:              # exit only
-            emit(event="track_closed", embedding=osnet(t.best_crop).tolist(), ...)
+            emit(event="track_closed", embedding=t.reid_feature.tolist(), ...)
     """
     emit(event="error", camera_id=camera,
          detail="ml/sidecar.py run() not implemented yet -- see the docstring")

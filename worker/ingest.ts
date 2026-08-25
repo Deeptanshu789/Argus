@@ -47,6 +47,31 @@ const CANDIDATE_WINDOW_S = 900;
 const recent: TrackRecord[] = [];
 const links: readonly CameraLink[] = LINKS;
 
+/**
+ * Every camera must produce the same embedding dimension, or Module C's layer 2
+ * compares vectors of different lengths, cosine() returns 0, and appearance
+ * matching silently stops working. That failure reads as "Re-ID just isn't
+ * matching well" and can burn hours. Fail loudly on the first mismatch instead.
+ */
+let embeddingDim: number | null = null;
+
+function checkEmbeddingDim(cameraId: string, embedding: readonly number[]): boolean {
+  if (embeddingDim === null) {
+    embeddingDim = embedding.length;
+    console.log(`embedding dimension: ${embeddingDim}`);
+    return true;
+  }
+  if (embedding.length !== embeddingDim) {
+    console.error(
+      `[${cameraId}] embedding is ${embedding.length}-dim but ${embeddingDim}-dim ` +
+      `was seen first. Cross-camera appearance matching CANNOT work until every ` +
+      `sidecar uses the same ReID model. Dropping this track.`,
+    );
+    return false;
+  }
+  return true;
+}
+
 function remember(t: TrackRecord) {
   recent.push(t);
   const cutoff = Date.now() - CANDIDATE_WINDOW_S * 1000;
@@ -106,6 +131,8 @@ async function handle(ev: SidecarEvent) {
       return;
 
     case "track_closed": {
+      if (!checkEmbeddingDim(ev.camera_id, ev.embedding)) return;
+
       // Track exit is the only moment cross-camera matching needs the
       // embedding, which is why the sidecar computes it here and nowhere else.
       const track: TrackRecord = {

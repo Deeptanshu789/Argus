@@ -2,10 +2,29 @@
 #   1. training the plate detector (on Kaggle, not here)
 #   2. the inference sidecar (ml/sidecar.py), which emits JSON to the Node worker
 # Everything else -- API, WebSocket, association, analytics, UI -- is TypeScript.
-ultralytics>=8.3
-paddleocr>=2.7
-paddlepaddle>=2.6
-torchreid>=1.4
+#
+# INSTALL TORCH FIRST, FROM THE CPU INDEX:
+#
+#   pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
+#   pip install -r ml/requirements.txt
+#
+# PyPI's default torch wheel bundles CUDA: ~2.5 GB of GPU runtime that cannot
+# run on this machine (AMD Radeon 860M, no CUDA). The CPU wheel is ~200 MB and
+# is what the sidecar actually uses. Skipping the first command still "works"
+# and costs you 2.3 GB of dead weight.
+#
+# Python 3.12, not 3.13 -- paddlepaddle has no 3.13 wheels.
+
+ultralytics>=8.3        # detection AND tracking AND Re-ID embeddings, see below
+paddleocr>=3.0
+paddlepaddle>=3.0
 opencv-python-headless>=4.9
 openvino>=2024.0
 numpy>=1.26
+
+# NO torchreid. The PyPI package of that name is an unofficial repackaging that
+# stops at 0.2.5, and the real deep-person-reid is a source install with a
+# Cython build step. Ultralytics already ships BoT-SORT with ReID
+# (ml/botsort.yaml: with_reid: True, model: auto), which gives tracking and
+# appearance embeddings from a dependency we need anyway. One model, no build,
+# runs on CPU.

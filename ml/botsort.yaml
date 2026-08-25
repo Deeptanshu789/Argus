@@ -1,0 +1,31 @@
+# Tracker config for ml/sidecar.py.
+#
+# BoT-SORT rather than plain ByteTrack because ByteTrack has no appearance
+# model, and Module C's layer 2 needs an embedding per track. BoT-SORT gives
+# tracking and Re-ID from one dependency we already have.
+
+tracker_type: botsort
+
+track_high_thresh: 0.25
+track_low_thresh: 0.1
+new_track_thresh: 0.25
+# Frames a lost track stays alive. We process at 5 FPS, not 30, so the default
+# 30 is only 6 seconds of real time -- too short to survive a vehicle passing
+# behind a bus. 60 frames = 12 s at our rate.
+track_buffer: 60
+match_thresh: 0.8
+fuse_score: True
+
+# Global motion compensation corrects for a MOVING camera. Ours are bolted to
+# poles. sparseOptFlow is pure wasted CPU here, and CPU is the whole budget.
+gmc_method: none
+
+# ReID: this is what produces the embedding Module C compares across cameras.
+with_reid: True
+# "auto" reuses the detector's own features -- no second model to load, no
+# weights to ship. ponytail: weaker than OSNet trained on VeRi. If layer 2
+# misses too often, point this at a dedicated Re-ID checkpoint; nothing else
+# changes, because the sidecar just forwards whatever vector it is handed.
+model: auto
+proximity_thresh: 0.5
+appearance_thresh: 0.8

@@ -183,8 +183,17 @@ export const SidecarEvent = z.discriminatedUnion("event", [
     color: z.string().nullable(),
     plate_text: z.string().nullable(),
     plate_conf: z.number().nullable(),
-    /** 512-dim OSNet Re-ID vector. Computed on exit only — see CLAUDE.md. */
-    embedding: z.array(z.number()).length(512),
+    /**
+     * Re-ID appearance vector, computed on track exit only — see CLAUDE.md.
+     *
+     * Length is NOT pinned here. It is whatever the tracker's ReID model
+     * produces, and swapping that model changes the dimension. What matters is
+     * that every camera produces the SAME dimension, since Module C compares
+     * them across cameras — the worker enforces that at runtime, because a
+     * mismatch makes cosine similarity return 0 and layer 2 silently stop
+     * firing, which looks like "Re-ID just isn't matching" rather than a bug.
+     */
+    embedding: z.array(z.number()).min(32),
     color_hist: z.array(z.number()),
   }),
   z.object({ event: z.literal("ready"), camera_id: z.string(), fps: z.number() }),

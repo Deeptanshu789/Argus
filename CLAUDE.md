@@ -15,7 +15,7 @@ exactly two places and nowhere else:
 | Python lives here | Why it cannot be TS |
 |---|---|
 | `ml/train_plate.py`, `ml/kaggle_train.ipynb` | Training. Runs on Kaggle, never in the app. |
-| `ml/sidecar.py` | Inference. YOLO + PaddleOCR + OSNet have no Node equivalents. |
+| `ml/sidecar.py` | Inference. YOLO + PaddleOCR have no Node equivalents. |
 
 `ml/sidecar.py` runs one process per camera and emits **newline-delimited JSON**
 on stdout. `worker/ingest.ts` parses it. That pipe is the only place Python and
@@ -28,7 +28,7 @@ about to write a `.py` file outside `ml/`, you are solving the wrong problem.
 
 ```
 ml/sidecar.py (one per camera)   ← the only runtime Python
-  ffmpeg decode @5fps → YOLOv8 (OpenVINO int8) → ByteTrack → PaddleOCR → OSNet
+  decode @5fps → YOLOv8 (OpenVINO int8) → BoT-SORT (track + ReID) → PaddleOCR
   stdout: {"event":"detection"|"track_closed"|"ready"|"error", ...}
                     │  newline-delimited JSON
 worker/ingest.ts    ▼   spawns + restarts sidecars, validates against contract
@@ -87,7 +87,7 @@ weights are a one-line swap at a single call site.
 ## CPU inference budget — respect it or the demo drops frames
 
 - Process video at **5 FPS, not 30**.
-- Vehicle detection + ByteTrack: every processed frame.
+- Vehicle detection + BoT-SORT: every processed frame.
 - Plate detection + OCR: **a track's first few frames and its best crop only.**
 - Re-ID embedding: **on track exit only** — the sole moment Module C needs it.
 
@@ -127,6 +127,29 @@ python ml/export_onnx.py --weights runs/detect/plate/weights/best.pt
 ```
 
 `next dev` alone boots the UI but **not** `/ws` — always `npm run dev`.
+
+## Python install — two traps
+
+```bash
+sudo dnf -y install python3.12          # NOT 3.13: paddlepaddle has no 3.13 wheels
+python3.12 -m venv .venv
+./.venv/bin/pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
+./.venv/bin/pip install -r ml/requirements.txt
+```
+
+The CPU torch index is not optional housekeeping. PyPI's default wheel bundles
+~2.5 GB of CUDA runtime that cannot run on this machine; the CPU wheel is
+~200 MB and is what the sidecar actually uses.
+
+**There is no `torchreid`.** The PyPI package of that name is an unofficial fork
+stuck at 0.2.5; the real deep-person-reid is a source build. Ultralytics
+BoT-SORT (`ml/botsort.yaml`, `with_reid: True, model: auto`) gives tracking and
+appearance embeddings from a dependency we need anyway.
+
+Embedding dimension is therefore **not fixed at 512** — it is whatever that
+model emits. Every camera must emit the same dimension; `worker/ingest.ts`
+checks this and fails loudly, because a mismatch makes cosine similarity return
+0 and layer 2 silently stop firing.
 
 ## Conventions
 
