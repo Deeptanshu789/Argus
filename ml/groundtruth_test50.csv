@@ -1,0 +1,60 @@
+# Ground truth for 50 images from ~/indian-plates/test, transcribed by eye
+# from the dataset's own annotation boxes, so the labels are independent of
+# the detector being measured.
+#
+#   ?  the plate is illegible to a human at this resolution — the ceiling,
+#      not a model failure. Excluded from accuracy.
+#   -  the box contains no registration plate (a model badge). Reading
+#      anything here is a FALSE POSITIVE.
+#
+# plate,image
+MH14EH7958,5b49ae32-c799-45e3-b139-9c56acf6370d___2014-Volkswagen-Polo-Review-jpg_jpeg.rf.cb4f65e3b210abdfae0b9b5ad61f8119.jpg
+TS09EB1458,8187c22d-5fa4-4976-9c00-80b2ab66b97d___1290890d1411349145-take-look-number-plate-img_20140903_093600_hdr-jpg_jpeg.rf.524da7b8dbd5c82a2c05056b949333a4.jpg
+TN74AH1413,9cad4b47-6c7b-4e30-ab55-b7fa040beb56___135717d1400912281-skoda-rapid-1-6tdi-cr-mt-elegance-ultima-candy-white-white-monster-_mg_2993comp-jpg_jpeg.rf.a7e4eea44ac7275a4c1ee926748f26ac.jpg
+AP39E1493,AP10_jpg.rf.4d6280fba659df288c4e1eafc0defd27.jpg
+?,AP4_jpg.rf.6c4affac5477c938485fbb0920ac70f7.jpg
+?,AR3_jpg.rf.0adb8cb1f088661d5c5550487315e8bc.jpg
+AS01BF9373,AS15_jpg.rf.7e97f8a92ca51dbea70342f576738385.jpg
+AS06Z0841,AS26_jpg.rf.8e6cb5c669ba3f5192158ba3434ed6f7.jpg
+AS23H0770,AS5_jpg.rf.66d01609e72e3dde4d56c7640ec4880d.jpg
+?,CG17_jpg.rf.059e77fdc88e3a64e5f74ece0949bb13.jpg
+CH01AF1382,CH9_jpg.rf.3e2dd07a3ac8caba474673c083a8fd0a.jpg
+DL9CAU4743,DL14_jpg.rf.b34812db9cc874954801c0bca390051d.jpg
+DL10CA0986,DL27_jpg.rf.c0a4534cbc8ccd910f52e1065fe0354b.jpg
+GA01E5947,GA5_jpg.rf.d46b7d7acbb03585c5aea9fb871d574a.jpg
+GJ06KP8508,GJ13_jpg.rf.b0c8036b5306296bb466894fbd38d50a.jpg
+GJ05JB6589,GJ28_jpg.rf.6c6a06d0d90b02f441bb9aec11760932.jpg
+HP36E3330,HP12_jpg.rf.a72b2cee4198388f331ecc40e2feccd1.jpg
+JH01AM0100,JH2_jpg.rf.bd3aa2f89a6b768ece8f2504e92db82e.jpg
+MH49AC6244,MH3_jpg.rf.1e17d32cf716beb15e38ec14fdb37651.jpg
+ML10B9306,ML14_jpg.rf.278d84fedcd37c7cce09207b89fc581f.jpg
+OD11P6123,OD19_jpg.rf.2d51f9ff2e80f0c9d53db39ebd3ec827.jpg
+PB10CK5005,PB25_jpg.rf.8917ff122da84272407aa19a07dc5401.jpg
+PB10EE0888,PB29_jpg.rf.dc9c8f9fc4ff6cecfed3223644b9f158.jpg
+SK01T3835,SK12_jpg.rf.523fb08d06094313144d41539b17ab40.jpg
+TN10AR0131,TN4_jpg.rf.1de4224cb91cd19dd6c313f1a228197b.jpg
+UP23K0008,UK4_jpg.rf.884f934ab7bf056daf9c2ca33dc6623c.jpg
+UP85BN4203,UP2_jpg.rf.1f7cf93004bfdca52e646c7b2afb1e38.jpg
+WB06J9177,WB16_jpg.rf.f0d68ece85f7f7c6825d159d5c8457fe.jpg
+TN28BA9999,ad1f5cbc-7545-407e-8974-a03ddb7b7779___833542696_1_1080x720_mahindra-scorpio-vlx-4wd-airbag-bs-iv-2012-diesel-jpg_jpeg.rf.91414f9a1447d17ab5cfba9f4a678e40.jpg
+MH20DJ0419,af270103-6ed4-4260-9d01-b8be2e2b9af1___skoda-rapid-1-5-tdi-dsg-review-jpg_jpeg.rf.9740ff18ac83a5b291d21d800310d71f.jpg
+-,b79f870d-15c7-48e3-8874-7c0e53e29f75___3e7fd381-0ae5-4421-8a70-279ee0ec1c61_754eab882b8290b29a0454dd45580a39_555X416_1-Copy-3-_jpg.rf.2a83c6c841cf1aad2179a657664abf17.jpg
+HR26CB1900,car-wbs-HR26CB1900_00000_png.rf.d0966716d0f802c5f04a9bd6d6327908.jpg
+MH14EH7958,car-wbs-MH14EH7958_00001_jpeg.rf.5dc6881b6831cc12935359f18da3faa3.jpg
+MH20DJ0419,car-wbs-MH20DJ0419_00000_jpeg.rf.2db35ad73c31bdaaaf8ff9883b369ec9.jpg
+MH47N4570,car-ybs-MH47N4570_00000_png.rf.873bfaa08668050cdf2a8da31a6114d9.jpg
+MH05DS8679,video10_1250_jpg.rf.3314dd39674a6572f63e7b68b5aeb89d.jpg
+MH02EK0837,video10_160_jpg.rf.2e9210d5abb50decc32ce37521aec427.jpg
+MH47Y1124,video11_1040_jpg.rf.b37908d30a63bb0045a6f4974e83937c.jpg
+MH02DQ0196,video11_540_jpg.rf.3b2ccbdb8eea507027436ddb199b28f2.jpg
+MH01AX3070,video11_750_jpg.rf.3efa381fe73b3755a3f167c1c7d86f9e.jpg
+?,video3_1140_jpg.rf.7827ec357382a713ed245af56f11cb09.jpg
+MH02ER9194,video3_640_jpg.rf.06d3766dc39f2254fbfcc7d9a03585cb.jpg
+MH01AV7461,video4_2820_jpg.rf.241b0e015c2396f895f48e42ed524fc8.jpg
+MH02DW8021,video4_3810_jpg.rf.0b5f194a74733920e9214c7f9f0256b1.jpg
+MH03CS6266,video5_100_jpg.rf.a7c1c6a8fa35105d963f49cf93b3d552.jpg
+MH02DS9365,video6_1090_jpg.rf.4f45673e4e207dbb01521bfb9445b334.jpg
+MH02DS9365,video6_870_jpg.rf.5411529b3867e8395edd992e1246b6fd.jpg
+MH02EE6842,video8_1050_jpg.rf.78efb1694bcb51c8907c766657ce1e25.jpg
+MH01BT0050,video8_870_jpg.rf.520186d40ecf58699708a9f2a77b9a6c.jpg
+MH02CD7733,video8_940_jpg.rf.109745963b33189e13ecff3655ca4d3d.jpg

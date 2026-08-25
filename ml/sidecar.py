@@ -380,6 +380,31 @@ def _ocr_lines(reader, image) -> list[tuple[str, float]]:
     return lines
 
 
+# Grow the plate box before reading it. MEASURED against 45 hand-labelled
+# plates, exact-match accuracy:
+#
+#    0% pad   28/45 (62%)   8 wrong, 9 missed
+#    4% pad   30/45 (67%)   5 wrong, 10 missed
+#    8% pad   35/45 (78%)   2 wrong, 8 missed     <- chosen
+#   14% pad   33/45 (73%)   3 wrong, 9 missed
+#   22% pad   35/45 (78%)   2 wrong, 8 missed
+#
+# The detector draws a box on the plate, not around it, and clips the outermost
+# character often enough to matter. Six of eight WRONG reads were a 10-character
+# plate read as 9 with the last digit gone -- "MH14EH7958" as "MH14EH795",
+# which then parses as a perfectly valid plate with a three-digit series and is
+# accepted with confidence. A wrong plate is worse than no plate: it attaches a
+# real registration to the wrong vehicle. Padding removed six of those eight.
+PLATE_PAD = 0.08
+
+
+def _pad(img, x1: int, y1: int, x2: int, y2: int):
+    h, w = img.shape[:2]
+    px = int((x2 - x1) * PLATE_PAD)
+    py = int((y2 - y1) * PLATE_PAD)
+    return img[max(y1 - py, 0):min(y2 + py, h), max(x1 - px, 0):min(x2 + px, w)]
+
+
 def _read_plate(reader, plate_model, crop) -> tuple[str | None, float | None]:
     """Plate box -> OCR -> positional correction. Returns (plate, confidence).
 
@@ -396,7 +421,7 @@ def _read_plate(reader, plate_model, crop) -> tuple[str | None, float | None]:
             return None, None
         box = max(res.boxes, key=lambda b: float(b.conf[0]))
         x1, y1, x2, y2 = (int(v) for v in box.xyxy[0])
-        region = crop[max(y1, 0):y2, max(x1, 0):x2]
+        region = _pad(crop, x1, y1, x2, y2)
         if region.size == 0:
             return None, None
 

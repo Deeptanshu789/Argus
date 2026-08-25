@@ -53,7 +53,26 @@ def _to_yolo(x1: float, y1: float, x2: float, y2: float, w: int, h: int) -> Box 
 def _index_images(src: Path) -> dict[str, Path]:
     """Image basename -> path. Basename because COCO/VOC reference files by name
     while the images may sit in any subdirectory."""
-    return {p.name: p for p in src.rglob("*") if p.suffix.lower() in IMG_EXT}
+    found: dict[str, Path] = {}
+    shadowed = 0
+    for p in src.rglob("*"):
+        if p.suffix.lower() not in IMG_EXT:
+            continue
+        if p.name in found:
+            # Two files with the same basename in different split folders. The
+            # index is keyed by name because COCO and VOC reference images that
+            # way, so one silently shadows the other and its annotations attach
+            # to the wrong picture. Loud, because the training run would look
+            # fine and score badly for no visible reason.
+            shadowed += 1
+            continue
+        found[p.name] = p
+    if shadowed:
+        print(f"warning: {shadowed} image(s) share a basename with another and were "
+              f"SKIPPED. Annotations reference images by name, so keeping both "
+              f"would attach labels to the wrong file. Rename them or prepare "
+              f"each split separately.")
+    return found
 
 
 # ------------------------------------------------------------------ loaders --
