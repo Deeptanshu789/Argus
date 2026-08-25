@@ -88,40 +88,85 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
-def correct_plate(raw: str) -> tuple[str | None, float]:
-    """Indian plates are XX 00 XX 0000: two letters, two digits, one-or-two
-    letters, four digits. Each position's character class is known, so an OCR
-    confusion can be corrected by position rather than guessed at.
-
-    Returns (plate, penalty). penalty is how many characters had to be fixed —
-    the caller subtracts it from OCR confidence, so a heavily-corrected read
-    does not masquerade as a confident one.
-    """
-    s = "".join(c for c in raw.upper() if c.isalnum())
-    if not 9 <= len(s) <= 10:
-        return None, 0.0
-    # positions: 0-1 alpha, 2-3 digit, then 1-2 alpha, last 4 digit
-    mid = len(s) - 4
-    classes = ["A", "A", "D", "D"] + ["A"] * (mid - 4) + ["D"] * 4
-    out, penalty = [], 0
-    for ch, cls in zip(s, classes):
-        want_digit = cls == "D"
+def _fix(chunk: str, want_digit: bool) -> tuple[str, int] | None:
+    """Force a run of characters into one class, correcting known OCR
+    confusions. Returns (fixed, corrections) or None if a character cannot
+    plausibly belong to that class at all."""
+    out, fixes = [], 0
+    for ch in chunk:
         if want_digit and ch.isalpha():
-            fixed = DIGIT_FOR.get(ch)
-            if fixed is None:
-                return None, 0.0
-            out.append(fixed); penalty += 1
+            got = DIGIT_FOR.get(ch)
+            if got is None:
+                return None
+            out.append(got); fixes += 1
         elif not want_digit and ch.isdigit():
-            fixed = ALPHA_FOR.get(ch)
-            if fixed is None:
-                return None, 0.0
-            out.append(fixed); penalty += 1
+            got = ALPHA_FOR.get(ch)
+            if got is None:
+                return None
+            out.append(got); fixes += 1
         else:
             out.append(ch)
-    plate = "".join(out)
-    if plate[:2] not in STATE_CODES:
+    return "".join(out), fixes
+
+
+def correct_plate(raw: str) -> tuple[str | None, float]:
+    """Validate and repair an OCR read of an Indian registration plate.
+
+    Returns (plate, penalty). penalty is how much of the string had to be
+    corrected — the caller subtracts it from OCR confidence, so a heavily
+    repaired read cannot present itself as confidently as a clean one.
+
+    THE SHAPE, and why it is not one rigid pattern:
+
+        <state 2 alpha> <district, starts with a digit> <series> <number>
+
+    A first version demanded exactly `AA DD A(A) DDDD` and rejected half the
+    plates measured on real photos. `DL9CAU4743` is a genuine Delhi plate whose
+    district code is digit-then-letter; `MH05DK101` has a three-digit series
+    number. Both are valid and both were thrown away, which matters more than
+    it sounds: layer 1 of the association engine is plate text and carries
+    60-70% of cross-camera matches, so a plate rejected here is a vehicle the
+    system can only follow by appearance.
+
+    What is still enforced, because these are what make a plate a plate:
+      - the state code is real (checked against STATE_CODES)
+      - the registration number is a trailing run of 2 to 4 digits
+      - the district begins with a digit
+    Correction is applied ONLY where the character class is known from
+    position. The series letters in the middle are left exactly as read.
+    """
+    s = "".join(c for c in raw.upper() if c.isalnum())
+    if not 9 <= len(s) <= 11:
         return None, 0.0
-    return plate, penalty * 0.05
+
+    state = _fix(s[:2], want_digit=False)
+    if state is None or state[0] not in STATE_CODES:
+        return None, 0.0
+
+    best: tuple[str, int] | None = None
+    # Prefer the longest trailing number and the longest district that parse:
+    # "4743" is a better reading of DL9CAU4743 than "743", and a shorter one
+    # silently drops a digit rather than failing.
+    for num_len in (4, 3):
+        for district_len in (2, 1):
+            series = s[2 + district_len : len(s) - num_len]
+            if not 1 <= len(series) <= 3:
+                continue
+            number = _fix(s[-num_len:], want_digit=True)
+            district = _fix(s[2 : 2 + district_len], want_digit=True)
+            fixed_series = _fix(series, want_digit=False)
+            if number is None or district is None or fixed_series is None:
+                continue
+            plate = state[0] + district[0] + fixed_series[0] + number[0]
+            fixes = state[1] + district[1] + fixed_series[1] + number[1]
+            if best is None or fixes < best[1]:
+                best = (plate, fixes)
+        if best is not None:
+            break          # a 4-digit number beat a 3-digit one; stop here
+
+    if best is None:
+        return None, 0.0
+    return best[0], round(best[1] * 0.05, 4)
 
 
 # Camera ordering for the synthetic demo. The vehicle travels CAM1 -> CAM3 ->
@@ -326,22 +371,39 @@ def _read_plate(reader, plate_model, crop) -> tuple[str | None, float | None]:
         print(f"ocr failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return None, None
 
-    best_raw, best_score = "", 0.0
+    lines: list[tuple[str, float]] = []
     for page in pages or []:
         if not isinstance(page, dict):
             continue
         texts = page.get("rec_texts") or []
-        scores = page.get("rec_scores") or [0.0] * len(texts)
-        for text, score in zip(texts, scores):
-            if len(text) >= len(best_raw) and float(score) >= best_score:
-                best_raw, best_score = text, float(score)
-    if not best_raw:
+        scores = page.get("rec_scores") or [1.0] * len(texts)
+        lines.extend((t, float(sc)) for t, sc in zip(texts, scores) if t.strip())
+    if not lines:
         return None, None
 
-    plate, penalty = correct_plate(best_raw)
-    if plate is None:
+    # MANY INDIAN PLATES ARE TWO LINES -- "DL 9C AU" above "4743" -- and
+    # PaddleOCR returns each line separately. Taking only the longest one reads
+    # half the plate and correct_plate() then rejects it as too short. Measured
+    # on 169 real photos, that single mistake accounted for 34 of 84 failures.
+    #
+    # So try the joined reading first, in the order the lines came back, and
+    # fall back to each line alone for the single-line plates.
+    joined = "".join(t for t, _ in lines)
+    mean_score = sum(sc for _, sc in lines) / len(lines)
+    candidates = [(joined, mean_score)]
+    candidates += sorted(lines, key=lambda ts: -len(ts[0]))
+
+    best: tuple[str, float] | None = None
+    for raw, score in candidates:
+        plate, penalty = correct_plate(raw)
+        if plate is None:
+            continue
+        conf = round(max(0.0, min(1.0, score - penalty)), 3)
+        if best is None or conf > best[1]:
+            best = (plate, conf)
+    if best is None:
         return None, None
-    return plate, round(max(0.0, min(1.0, best_score - penalty)), 3)
+    return best
 
 
 def run(camera: str, source: str, fps: int, loop: bool = False) -> None:
@@ -558,11 +620,22 @@ def _selfcheck() -> None:
     assert correct_plate("KA01M01234")[0] == "KA01MO1234"
     assert correct_plate("KA 05 MR 7821")[0] == "KA05MR7821", "spaces must be tolerated"
     assert correct_plate("MH04AQ5678")[0] == "MH04AQ5678"
+    # Real formats an earlier, stricter version threw away. Each of these was
+    # measured on actual photographs; layer 1 of the association engine cannot
+    # match a vehicle whose plate never entered the system.
+    assert correct_plate("DL9CAU4743")[0] == "DL9CAU4743", \
+        "Delhi district codes are digit-then-letter"
+    assert correct_plate("MH05DK101")[0] == "MH05DK101", \
+        "the registration number can be three digits"
+    assert correct_plate("KL60N5344")[0] == "KL60N5344", "one series letter is valid"
+    assert correct_plate("AP07AD5555")[0] == "AP07AD5555"
     # Rejections.
     assert correct_plate("XX01MB1234")[0] is None, "unknown state code must be rejected"
     assert correct_plate("KA01MB12")[0] is None, "too short"
     assert correct_plate("KA01MB12345678")[0] is None, "too long"
     assert correct_plate("K#01MB1234")[0] is None, "punctuation strips to wrong length"
+    assert correct_plate("CRETA")[0] is None, "a badge is not a plate"
+    assert correct_plate("06A929")[0] is None, "half a plate must not pass"
 
     # Colour histogram: normalised, right length, and it must not blow up on an
     # empty crop -- a zero-area box is what a box clipped at the frame edge gives.

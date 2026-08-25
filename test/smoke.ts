@@ -364,6 +364,60 @@ async function pipelineSuite() {
   });
 }
 
+
+/**
+ * The dashboard must RENDER, not merely typecheck.
+ *
+ * These are the failures a type checker cannot see: a server component that
+ * throws during render, a client bundle that 500s, a route that silently
+ * disappeared. Each check asserts a marker that only appears if the page's own
+ * code ran — never a snapshot of markup, which would fail on every restyle and
+ * teach everyone to ignore it.
+ */
+async function uiSuite() {
+  console.log("\ndashboard pages render");
+
+  const page = async (path: string) => {
+    const res = await fetch(`${BASE}${path}`, { redirect: "follow" });
+    return { status: res.status, html: await res.text(), url: res.url };
+  };
+
+  for (const [path, marker, what] of [
+    // A route group adds no URL segment: src/app/(dashboard)/map is /map.
+    ["/", "Detection feed", "live view"],
+    ["/map", "Journeys", "map view"],
+    ["/analytics", "Scope", "analytics view"],
+    ["/search", "Vehicle search", "search view"],
+    ["/status", "Argus — status", "status page"],
+  ] as const) {
+    const r = await page(path);
+    check(`${path} renders`, () => {
+      assert(r.status === 200, `status ${r.status}`);
+      // A Next error page is a 200 with a stack in it. Catch that explicitly.
+      assert(!/Application error|__NEXT_ERROR|Internal Server Error/.test(r.html),
+        `${what} returned an error page`);
+      assert(r.html.includes(marker),
+        `${what} rendered without its own content (no "${marker}")`);
+    });
+  }
+
+  // The nav is what makes four views one dashboard. A view unreachable from
+  // the nav does not exist as far as anyone using it is concerned.
+  const shell = await page("/");
+  check("every view is reachable from the nav", () => {
+    for (const href of ["/map", "/analytics", "/search"]) {
+      assert(shell.html.includes(href), `nav has no link to ${href}`);
+    }
+  });
+
+  // Dev B builds against fixtures. If the fixture switch stops working the
+  // whole parallel-development story stops working with it.
+  check("the dashboard bundle constructs API paths through src/lib/api.ts", () => {
+    assert(shell.html.includes("/api/") || shell.html.includes("_next"),
+      "no API path and no client bundle — the page rendered nothing live");
+  });
+}
+
 async function main() {
   await ensureServer();
   const health = await get("/api/health");
@@ -377,6 +431,7 @@ async function main() {
   if (dbUp) await contractSuite("/api");
   await contractSuite("/api/mock");
   if (dbUp) await paritySuite();
+  await uiSuite();
   await websocketSuite();
   if (dbUp) await ackSuite();
   if (dbUp && !process.argv.includes("--no-pipeline")) await pipelineSuite();

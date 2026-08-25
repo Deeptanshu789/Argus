@@ -74,9 +74,11 @@ export default async function Page() {
       fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
     }}>
       <div style={{ maxWidth: 900, margin: "0 auto" }}>
-        <h1 style={{ margin: 0, fontSize: 28, letterSpacing: ".02em" }}>Argus</h1>
+        <h1 style={{ margin: 0, fontSize: 28, letterSpacing: ".02em" }}>Argus — status</h1>
         <p style={{ color: C.dim, marginTop: ".25rem", fontSize: 13 }}>
-          City-wide ANPR and cross-camera vehicle trajectory tracking · SIH26127
+          Is the pipeline alive? Server-rendered, so this page loading at all
+          proves the routes, the database and the contract work.{" "}
+          <a href="/dashboard" style={{ color: C.link }}>Dashboard</a>
         </p>
 
         <Panel title="System">
