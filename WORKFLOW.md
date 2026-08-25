@@ -121,9 +121,16 @@ there is no reason to pay it.
 
 ```bash
 mkdir -p runs/detect/plate/weights
-unzip argus-plate-weights.zip -d runs/detect/plate/weights
-python ml/export_onnx.py --weights runs/detect/plate/weights/best.pt
+unzip ~/Downloads/argus-plate-weights.zip -d runs/detect/plate/weights
+unzip ~/Downloads/argus-plate-openvino.zip -d runs/detect/plate/weights/best_openvino_model
 ```
+
+> **Export int8 on Kaggle, not here.** Quantisation measures activation ranges
+> on real images, so it needs the dataset — which lives on Kaggle, not on the
+> laptop. The notebook's last cell does the export and zips the IR. Running
+> `ml/export_onnx.py` locally without the dataset now fails with that
+> explanation rather than dying inside ultralytics. `--fp32` works with no data
+> at all but gives up roughly 2x of the speedup.
 
 **Go/no-go bar: `mAP50 >= 0.85` on val.** Below 0.7 means the dataset conversion
 is wrong, not the training — check labels are class `0` and boxes normalized
