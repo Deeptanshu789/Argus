@@ -30,6 +30,26 @@ python3 -m venv .venv && source .venv/bin/activate
 pip install -r ml/requirements.txt
 ```
 
+## What already exists — do not rebuild it
+
+| Piece | State |
+|---|---|
+| `src/contract.ts` | Frozen. zod schemas, all types inferred from them. |
+| `src/server/mock.ts` | Serves every route from seeded fixtures. |
+| **`src/server/association.ts` — Module C ★** | **Written and selfchecked.** Do not rewrite it. |
+| `src/server/analytics.ts` — Module D | Written and selfchecked. Do not rewrite it. |
+| `worker/ingest.ts` | Supervises sidecars, validates output, calls the association engine. DB writes are marked `TODO(Dev A)`. |
+| `ml/sidecar.py` | Event contract, `correct_plate()`, `--source demo`. `run()` is the stub you fill in. |
+
+Watch the whole path run before you touch anything — no video, no models, no GPU:
+
+```bash
+ARGUS_PYTHON=python3 ARGUS_CAMERAS='CAM1=demo,CAM3=demo' npm run worker
+# [MATCH] CAM1->CAM3 KA05MR7821 via plate conf 0.99 in 164s [plate+reid+spatial_temporal]
+```
+
+`npm run selfcheck` runs all three suites. Keep them green.
+
 **Read these first, in this order, before writing any code:**
 
 1. `src/contract.ts` — zod schemas for every response, message, and sidecar
@@ -123,44 +143,47 @@ closed tracks to the association engine.
 **Acceptance:** running `npm run worker` against a demo video populates `tracks`
 with plate text on most vehicles and an embedding on every closed track.
 
-### 3. `src/server/association.ts` — Module C ★ THE DIFFERENTIATOR
+### 3. Persist Module C's output — the engine is already written
 
-**This is where 40% of the project's value sits. Protect these hours. Any team
-can ship single-camera ANPR; this is what wins.** It is plain TypeScript —
-cosine similarity over 512 floats and a graph lookup. No ML libraries.
+`src/server/association.ts` implements the three layers, the 2-of-3 rule, the
+shortest-path travel-time check, and trajectory stitching. It is selfchecked.
+**Read it, do not rewrite it.** Four decisions in there are load-bearing and
+were arrived at by finding the bug:
 
-- **Layer 1 — plate text.** Exact match, both sides confident → confidence 0.99.
-  Covers 60-70% of cases.
-- **Layer 2 — appearance.** Cosine similarity of the 512-dim embeddings > 0.75,
-  with colour-histogram similarity as a secondary signal. Covers 20-25% — the
-  occluded and unreadable plates.
-- **Layer 3 — spatial-temporal feasibility.** `camera_links` gives an expected
-  travel time between two cameras. Accept only if
-  `0.5 * expected <= actual <= 2.0 * expected`. Rejects the physically
-  impossible and disambiguates Layer 2.
+- Layer 3 **vetoes** proven impossibility rather than being outvoted. Plain
+  2-of-3 lets plate + appearance confirm a car covering 1.4 km in 30 s.
+- A **missing route only abstains**, so real matches are not lost to incomplete
+  topology data.
+- Appearance confidence is **capped below** an exact plate read.
+- `associateArrival` searches **backwards**, because the later camera's track
+  closes last.
 
-Combined score when Layer 1 does not fire:
-`0.6 * reid_sim + 0.2 * colour_sim + 0.2 * time_score`.
+Your job here is persistence, not logic. In `worker/ingest.ts:handle()`:
 
-**Confirm a match only when 2 of the 3 layers agree.** This rule is the defence
-against false trajectories, which are the single most damaging thing a judge can
-see. A beautiful dashboard showing a wrong trajectory is worse than a plain one
-showing a right one.
+- Replace the in-memory `recent` ring with
+  `SELECT * FROM tracks WHERE exit_time > now() - interval '15 minutes'`.
+- Replace the `LINKS` import from mock fixtures with `SELECT * FROM camera_links`.
+- Insert `matches` rows from the returned `MatchResult`, extend `trajectories`,
+  and publish `match` and `trajectory_update` messages.
 
-Write `matches` rows with the `method` that fired, and stitch confirmed chains
-into `trajectories`.
+Everything between those two lines — `associateArrival`, `toHop`, `stitch` —
+stays exactly as it is.
 
-**Acceptance:** given two demo videos of the same route as CAM1 and CAM3, at
-least one vehicle is correctly matched, `matches` records the method, and a
-`trajectories` row contains both track ids. Leave one `assert`-based check that
-a deliberately infeasible pair (10 km apart, 30 s gap) is **rejected**.
+**Acceptance:** given two demo videos of the same route as CAM1 and CAM3, a
+`matches` row exists with the correct `method`, and a `trajectories` row
+contains both track ids. `npm run selfcheck` still passes.
 
-### 4. `src/server/analytics.ts` — Module D
+### 4. Persist Module D's output — also already written
 
-Per-camera, per-bucket: vehicle count, type breakdown, speed estimate,
-congestion score (density x inverse speed, normalized 0-100). Anomalies:
-stationary > 5 min, wrong-way, volume spike. Write `analytics` and `alerts`.
-Use BullMQ for the periodic rollup — **not** a Python scheduler.
+`src/server/analytics.ts` gives you `bucketize`, `congestionScore`,
+`estimateSpeed`, `headingDeg`, `detectStationary`, `detectWrongWay`, and
+`detectVolumeSpike`. Selfchecked. Wire them:
+
+- Write `analytics` and `alerts` rows.
+- Schedule the periodic rollup with **BullMQ** — not a Python scheduler.
+- **Measure `metersPerPixel` per camera** against a known landmark (a lane
+  width, a crossing) and store it. It is a real calibration knob; no default can
+  guess it, and every speed and congestion number depends on it.
 
 **Acceptance:** `/api/analytics` returns 12 buckets of real data and at least one
 anomaly fires on demo footage.
@@ -181,8 +204,9 @@ every view still works with zero frontend changes. That is the whole test.
 
 - **Never commit weights, datasets, `runs/`, `node_modules/`, `.next/`** — all
   gitignored, keep it that way.
-- Keep `src/server/mock.ts` and `npm run selfcheck` passing. The mock is the
-  frontend's lifeline and the reference for what your real routes must return.
+- Keep `npm run selfcheck` passing — all three suites. The mock is the
+  dashboard's lifeline and the reference for what your real routes must return;
+  the other two guard Module C and Module D.
 - `npm run check` must pass before every push.
 - Non-trivial logic (association scoring, congestion formula, plate regex) leaves
   **one runnable `assert`-based check**. No test frameworks, no fixtures — the
