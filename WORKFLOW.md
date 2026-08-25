@@ -40,13 +40,26 @@ cp .env.example .env.local
 
 # infra
 docker compose up -d db redis      # applies db/schema.sql on first run
+npm run db:setup                   # re-apply the schema + seed the camera graph
 
 # app: UI + /api + /ws, one process, port 3000
 npm run dev
 ```
 
-Verify: <http://localhost:3000> lists the mock routes, and
-`curl localhost:3000/api/mock/cameras` returns four cameras.
+`npm run db:setup` is safe to re-run: every statement in `db/schema.sql` is
+idempotent. Run it after any schema change — the Postgres container applies its
+init scripts **only on an empty volume**, so a change made later has no other
+way in short of destroying the data.
+
+Verify:
+
+```bash
+curl -s localhost:3000/api/health          # {"ok":true,"database":"up"}
+npm run smoke                              # 38 checks, judged by the zod contract
+```
+
+<http://localhost:3000> is the operator status page: database, cameras, recent
+tracks, confirmed cross-camera journeys, open alerts.
 
 Docker on Fedora, if not installed:
 
@@ -188,14 +201,11 @@ Switching the whole app to live data is one env var.
 
 ## Stage 3 — Parallel build
 
-**Dev A** fills in `ml/sidecar.py:run()` — the real decode/detect/OCR/track loop
-— then the database writes marked `TODO(Dev A)` in `worker/ingest.ts:handle()`,
-then the real `/api` route handlers and the live WebSocket hub.
-
-**Module C (`src/server/association.ts`) and Module D
-(`src/server/analytics.ts`) are already written and selfchecked**, and the
-worker already calls the association engine. What is missing there is
-persistence, not logic.
+**Dev A's pipeline is done.** `ml/sidecar.py:run()` is the real
+decode/detect/OCR/track loop, `worker/ingest.ts` persists everything and runs
+Modules C and D, the live `/api/*` routes are contract-validated, and Redis
+feeds the WebSocket hub. What is left on this side is tuning against real
+footage, not building.
 
 Before touching the CV code, watch the whole path run with no video, no models
 and no GPU:
@@ -262,6 +272,10 @@ features.**
 | Whole stack | `docker compose up -d` |
 | Plate-correction check | `python ml/sidecar.py --selfcheck --camera X --source X` |
 | Dataset prep check | `python ml/prepare_dataset.py --selfcheck` |
-| Re-apply DB schema | `psql "$DATABASE_URL" -f db/schema.sql` |
+| Re-apply DB schema + seed | `npm run db:setup` |
+| Every endpoint over real HTTP | `npm run smoke` |
+| Full pipeline on video | `python ml/make_demo_clips.py` then `ARGUS_CAMERAS='CAM1=demo/cam1.mp4,CAM3=demo/cam3.mp4,CAM2=demo/cam2.mp4' npm run worker` |
+| Eyeball the detector | `python ml/demo_detect.py --source photo.jpg --ocr` |
+| Score the detector + OCR | `python ml/validate_plate.py --data ~/indian-plates --ocr` |
 | One sidecar by hand | `python ml/sidecar.py --camera CAM1 --source demo/cam1.mp4` |
 | One synthetic sidecar | `python ml/sidecar.py --camera CAM1 --source demo` |
