@@ -57,12 +57,21 @@ sudo dnf -y install docker-ce docker-ce-cli containerd.io docker-compose-plugin
 sudo systemctl enable --now docker && sudo usermod -aG docker $USER   # re-login
 ```
 
-Python, only for the sidecar (Dev A only, and only when starting Module A):
+Python, only for the sidecar (Dev A only, and only when starting Module A).
+
+> **Use Python 3.12, not 3.13.** Fedora 42 ships 3.13 as `python3`, but
+> `paddlepaddle` and `torchreid` have no reliable 3.13 wheels — you get a
+> "no matching distribution" wall partway through the install. Nothing else in
+> the project cares, so pin the ml venv and move on.
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
+sudo dnf -y install python3.12
+python3.12 -m venv .venv && source .venv/bin/activate
 pip install -r ml/requirements.txt
 ```
+
+`ARGUS_PYTHON` in `.env.local` must point at that interpreter (`.venv/bin/python`).
+`ffmpeg` is also required for video decode; Fedora 42 ships it already.
 
 ---
 
