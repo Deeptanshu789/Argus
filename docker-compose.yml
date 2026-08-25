@@ -1,0 +1,67 @@
+# Argus — full stack. `docker compose up -d` brings everything up.
+# During the build most work happens against `up -d db redis` plus a local
+# `uvicorn --reload` / `npm run dev`; the backend/frontend services here are for
+# the demo machine and for judges.
+
+services:
+  db:
+    image: timescale/timescaledb:latest-pg16
+    environment:
+      POSTGRES_USER: argus
+      POSTGRES_PASSWORD: argus
+      POSTGRES_DB: argus
+    ports: ["5432:5432"]
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U argus"]
+      interval: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+
+  backend:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql://argus:argus@db:5432/argus
+      REDIS_URL: redis://redis:6379/0
+    ports: ["8000:8000"]
+    volumes:
+      - ./backend:/app
+      - ./ml:/app/ml:ro
+      - ./demo:/app/demo:ro
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    command: uvicorn main:app --host 0.0.0.0 --port 8000
+
+  worker:
+    build: ./backend
+    environment:
+      DATABASE_URL: postgresql://argus:argus@db:5432/argus
+      REDIS_URL: redis://redis:6379/0
+    volumes:
+      - ./backend:/app
+      - ./ml:/app/ml:ro
+      - ./demo:/app/demo:ro
+    depends_on:
+      backend: {condition: service_started}
+    command: celery -A tasks worker --loglevel=info --concurrency=2
+
+  frontend:
+    build: ./frontend
+    environment:
+      VITE_API_URL: http://localhost:8000
+    ports: ["5173:5173"]
+    depends_on: [backend]
+    command: npm run dev -- --host 0.0.0.0
+
+volumes:
+  pgdata:

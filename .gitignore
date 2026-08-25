@@ -1,0 +1,19 @@
+# datasets & weights — never in git
+datasets/
+runs/
+*.pt
+*.onnx
+*_openvino_model/
+ml/train.log
+
+# python
+.venv/
+__pycache__/
+*.py[cod]
+
+# node
+node_modules/
+dist/
+
+# env
+.env
