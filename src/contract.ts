@@ -191,6 +191,11 @@ export const SidecarEvent = z.discriminatedUnion("event", [
   z.object({ event: z.literal("error"), camera_id: z.string(), detail: z.string() }),
 ]);
 
+export type CameraStatus = z.infer<typeof CameraStatus>;
+export type VehicleType = z.infer<typeof VehicleType>;
+export type MatchMethod = z.infer<typeof MatchMethod>;
+export type AlertKind = z.infer<typeof AlertKind>;
+export type Severity = z.infer<typeof Severity>;
 export type Camera = z.infer<typeof Camera>;
 export type CameraLink = z.infer<typeof CameraLink>;
 export type Track = z.infer<typeof Track>;

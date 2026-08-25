@@ -156,9 +156,26 @@ Switching the whole app to live data is one env var.
 
 ## Stage 3 — Parallel build
 
-**Dev A** fills in `ml/sidecar.py:run()`, then `worker/ingest.ts:handle()`, then
-`src/server/association.ts` (Module C), `src/server/analytics.ts` (Module D),
-and the real `/api` route handlers.
+**Dev A** fills in `ml/sidecar.py:run()` — the real decode/detect/OCR/track loop
+— then the database writes marked `TODO(Dev A)` in `worker/ingest.ts:handle()`,
+then the real `/api` route handlers and the live WebSocket hub.
+
+**Module C (`src/server/association.ts`) and Module D
+(`src/server/analytics.ts`) are already written and selfchecked**, and the
+worker already calls the association engine. What is missing there is
+persistence, not logic.
+
+Before touching the CV code, watch the whole path run with no video, no models
+and no GPU:
+
+```bash
+ARGUS_PYTHON=python3 ARGUS_CAMERAS='CAM1=demo,CAM3=demo' npm run worker
+# [MATCH] CAM1->CAM3 KA05MR7821 via plate conf 0.99 in 164s [plate+reid+spatial_temporal]
+```
+
+`--source demo` makes the sidecar emit a scripted vehicle instead of reading
+video. The third leg (CAM2) deliberately has no readable plate, so the match has
+to come from layers 2 and 3 — the Act 2 case.
 
 **Dev B** builds the four dashboard views against `/api/mock`.
 
@@ -207,10 +224,12 @@ features.**
 | App: UI + API + WebSocket | `npm run dev` |
 | Ingest worker + sidecars | `npm run worker` |
 | Typecheck | `npm run check` |
-| Verify fixtures vs contract | `npm run selfcheck` |
+| Verify fixtures + Module C + Module D | `npm run selfcheck` |
+| End-to-end, no video or CV deps | `ARGUS_PYTHON=python3 ARGUS_CAMERAS='CAM1=demo,CAM3=demo' npm run worker` |
 | Infra only | `docker compose up -d db redis` |
 | Whole stack | `docker compose up -d` |
 | Plate-correction check | `python ml/sidecar.py --selfcheck --camera X --source X` |
 | Dataset prep check | `python ml/prepare_dataset.py --selfcheck` |
 | Re-apply DB schema | `psql "$DATABASE_URL" -f db/schema.sql` |
 | One sidecar by hand | `python ml/sidecar.py --camera CAM1 --source demo/cam1.mp4` |
+| One synthetic sidecar | `python ml/sidecar.py --camera CAM1 --source demo` |

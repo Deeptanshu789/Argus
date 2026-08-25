@@ -13,7 +13,9 @@
  */
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
-import { SidecarEvent } from "@/contract";
+import { SidecarEvent, type CameraLink } from "@/contract";
+import { associateArrival, toHop, type TrackRecord } from "@/server/association";
+import { LINKS } from "@/server/mock";
 
 const PYTHON = process.env.ARGUS_PYTHON ?? ".venv/bin/python";
 const CAMERAS = (process.env.ARGUS_CAMERAS ?? "CAM1=demo/cam1.mp4,CAM2=demo/cam2.mp4")
@@ -25,6 +27,31 @@ const CAMERAS = (process.env.ARGUS_CAMERAS ?? "CAM1=demo/cam1.mp4,CAM2=demo/cam2
 
 /** ponytail: fixed 2s backoff. Exponential backoff if a flaky RTSP source shows up. */
 const RESTART_MS = 2000;
+
+/**
+ * How far back to look for a vehicle's previous camera. Anything older than the
+ * slowest link in the graph cannot be a candidate, so holding more is waste.
+ */
+const CANDIDATE_WINDOW_S = 900;
+
+/**
+ * ponytail: in-memory ring of recently closed tracks, and the camera graph read
+ * from the mock fixtures. Correct for a 4-camera demo and it makes the hour-10
+ * gate reachable before the database layer exists.
+ *
+ * Dev A replaces both with queries: candidates become
+ * `SELECT * FROM tracks WHERE exit_time > now() - interval '15 minutes'`, and
+ * the graph becomes `SELECT * FROM camera_links`. Everything below that line —
+ * associate(), toHop() — stays exactly as it is.
+ */
+const recent: TrackRecord[] = [];
+const links: readonly CameraLink[] = LINKS;
+
+function remember(t: TrackRecord) {
+  recent.push(t);
+  const cutoff = Date.now() - CANDIDATE_WINDOW_S * 1000;
+  while (recent.length && Date.parse(recent[0]!.entry_time) < cutoff) recent.shift();
+}
 
 function start(cam: { id: string; source: string }) {
   const proc = spawn(
@@ -68,17 +95,55 @@ async function handle(ev: SidecarEvent) {
     case "ready":
       console.log(`[${ev.camera_id}] ready at ${ev.fps} fps`);
       return;
+
     case "error":
       console.error(`[${ev.camera_id}] ${ev.detail}`);
       return;
+
     case "detection":
-      // TODO(Dev A): insert into `detections`, publish a `detection` message.
+      // TODO(Dev A): insert into `detections`; publish a `detection` message to
+      // Redis so server.ts broadcast()s it.
       return;
-    case "track_closed":
-      // TODO(Dev A): insert into `tracks`, then hand the embedding to the
-      // association engine (src/server/association.ts). Track exit is the only
-      // moment cross-camera matching needs the embedding.
+
+    case "track_closed": {
+      // Track exit is the only moment cross-camera matching needs the
+      // embedding, which is why the sidecar computes it here and nowhere else.
+      const track: TrackRecord = {
+        id: `${ev.camera_id}:${ev.track_id}`,
+        camera_id: ev.camera_id,
+        track_id: ev.track_id,
+        plate_text: ev.plate_text,
+        plate_conf: ev.plate_conf,
+        embedding: ev.embedding,
+        color_hist: ev.color_hist,
+        entry_time: ev.entry_time,
+        exit_time: ev.exit_time,
+      };
+
+      // Search BACKWARDS. A vehicle leaves CAM1 at 10:00 and reaches CAM3 at
+      // 10:03, so CAM3's track closes last — by the time this event arrives,
+      // the CAM1 track is already in `recent`. Looking forward would find
+      // nothing, because the continuation has not been observed yet.
+      const candidates = recent.filter(
+        (c) => c.camera_id !== track.camera_id && c.exit_time! < track.entry_time,
+      );
+      const match = associateArrival(track, candidates, links);
+      if (match) {
+        const hop = toHop(match);
+        console.log(
+          `[MATCH] ${match.from.camera_id}->${match.to.camera_id} ` +
+          `${match.to.plate_text ?? "(no plate)"} via ${hop.method} ` +
+          `conf ${hop.confidence} in ${hop.travel_time_s}s ` +
+          `[${match.agreed.join("+")}]`,
+        );
+        // TODO(Dev A): insert into `matches`, extend `trajectories`, publish
+        // `match` and `trajectory_update` messages.
+      }
+
+      remember(track);
+      // TODO(Dev A): insert into `tracks`.
       return;
+    }
   }
 }
 

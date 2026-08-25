@@ -3,14 +3,16 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "tsx watch server.ts",
     "build": "next build",
     "start": "NODE_ENV=production tsx server.ts",
     "worker": "tsx watch worker/ingest.ts",
     "check": "tsc --noEmit",
-    "selfcheck": "tsx src/server/mock.selfcheck.ts",
+    "selfcheck": "tsx src/server/mock.selfcheck.ts && tsx src/server/association.selfcheck.ts && tsx src/server/analytics.selfcheck.ts",
     "db:push": "drizzle-kit push"
   },
   "dependencies": {

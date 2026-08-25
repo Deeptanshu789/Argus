@@ -104,6 +104,64 @@ def correct_plate(raw: str) -> tuple[str | None, float]:
     return plate, penalty * 0.05
 
 
+# Camera ordering for the synthetic demo. The vehicle travels CAM1 -> CAM3 ->
+# CAM2, and each sidecar staggers its output so the worker sees the legs in the
+# order real event timing would deliver them.
+DEMO_ROUTE = ["CAM1", "CAM3", "CAM2", "CAM4"]
+DEMO_PLATE = "KA05MR7821"
+
+
+def _demo_embedding(seed: int) -> list[float]:
+    """Deterministic 512-dim vector. Same vehicle -> near-identical vectors, so
+    layer 2 of the association engine fires exactly as it would on real OSNet
+    output."""
+    import math
+    return [round(math.sin((i + 1) * 0.017 + seed), 6) for i in range(512)]
+
+
+def demo(camera: str, fps: int) -> None:
+    """Emit a scripted event sequence -- no video, no models, no CV dependencies.
+
+    Exists so the whole Python -> JSON -> worker -> association path can be run
+    and watched today, before the real pipeline or a GPU-trained detector exist.
+    Also gives the dashboard developer live traffic without sourcing footage.
+
+        ARGUS_CAMERAS=CAM1=demo,CAM3=demo npm run worker
+
+    Timestamps are backdated so a journey that takes minutes plays out
+    instantly: CAM1's vehicle exits 200 s "ago", CAM3's arrives 30 s "ago", which
+    is inside the 0.5x-2.0x window around the 168 s link.
+    """
+    import time
+
+    try:
+        leg = DEMO_ROUTE.index(camera)
+    except ValueError:
+        leg = 0
+    # Stagger so the earlier leg is already in the worker's candidate window
+    # when the later one closes -- the same ordering real cameras produce.
+    time.sleep(leg * 2)
+
+    base = time.time() - 200 + leg * 170
+    entry = datetime.fromtimestamp(base, timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    exit_ = datetime.fromtimestamp(base + 8, timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    for i in range(fps):
+        emit(event="detection", camera_id=camera, track_id="T0001", ts=entry,
+             bbox=[400 + i * 12, 220, 560 + i * 12, 340], conf=0.93, vehicle_type="car")
+        time.sleep(1.0 / max(fps, 1))
+
+    emit(event="track_closed", camera_id=camera, track_id="T0001",
+         entry_time=entry, exit_time=exit_, vehicle_type="car", color="white",
+         # Third leg has an unreadable plate on purpose: it forces the match to
+         # come from layers 2+3, which is exactly what Act 2 of the demo shows.
+         plate_text=None if camera == "CAM2" else DEMO_PLATE,
+         plate_conf=None if camera == "CAM2" else 0.97,
+         embedding=_demo_embedding(3), color_hist=[10.0, 20.0, 30.0, 40.0])
+
+    print(f"[{camera}] demo leg {leg} emitted", file=sys.stderr)
+
+
 def run(camera: str, source: str, fps: int) -> None:
     """Real pipeline. Dev A fills this in; the event shapes above are fixed.
 
@@ -137,6 +195,8 @@ def main() -> None:
 
     emit(event="ready", camera_id=args.camera, fps=args.fps)
     try:
+        if args.source == "demo":
+            return demo(args.camera, args.fps)
         run(args.camera, args.source, args.fps)
     except SystemExit:
         raise

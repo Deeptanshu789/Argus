@@ -114,8 +114,12 @@ say so.**
 npm run dev          # Next UI + /api + /ws on :3000  (custom server)
 npm run worker       # ingest supervisor + Python sidecars
 npm run check        # tsc --noEmit
-npm run selfcheck    # mock fixtures vs the contract
+npm run selfcheck    # mock fixtures + Module C + Module D
 docker compose up -d db redis
+
+# End-to-end with no video, no CV deps, no GPU: synthetic sidecars that emit
+# a vehicle travelling CAM1 -> CAM3 -> CAM2 (third leg has no readable plate).
+ARGUS_PYTHON=python3 ARGUS_CAMERAS='CAM1=demo,CAM3=demo' npm run worker
 
 python ml/sidecar.py --selfcheck --camera X --source X   # plate-correction check
 python ml/train_plate.py --epochs 50        # on Kaggle
@@ -137,6 +141,19 @@ python ml/export_onnx.py --weights runs/detect/plate/weights/best.pt
 - Non-trivial logic leaves one runnable `assert`-based check, not a test suite.
 - Deliberate shortcuts get a `ponytail:` comment naming the ceiling and the
   upgrade path.
+
+## State of play
+
+| Piece | Status |
+|---|---|
+| `src/contract.ts`, `src/server/mock.ts` | Done, selfchecked |
+| `src/server/association.ts` — **Module C ★** | Done, selfchecked |
+| `src/server/analytics.ts` — Module D | Done, selfchecked |
+| `worker/ingest.ts` | Supervises sidecars, validates, associates. DB writes are TODO |
+| `ml/sidecar.py` | Event contract, `correct_plate()`, `--source demo`. `run()` is TODO |
+| `src/app/(dashboard)` | Not started — Dev B |
+| Real `/api/*` routes, Drizzle layer | Not started — Dev A |
+| Trained plate weights | Not started — needs a Kaggle run |
 
 ## Non-negotiable
 
