@@ -25,8 +25,9 @@ Event types, one JSON object per line on stdout:
 Diagnostics go to stderr. Anything non-JSON on stdout is a bug.
 
 NO GPU. The demo machine is an AMD Ryzen AI 7 350 with no CUDA device. Models
-load as OpenVINO int8 (see ml/export_onnx.py). Training happens separately on
-Kaggle; this file never trains anything.
+load as an OpenVINO export when one exists (see ml/export_onnx.py), PyTorch CPU
+otherwise. Training happens separately on Kaggle; this file never trains
+anything.
 
 CPU budget, and the reason this file is structured the way it is:
   - decode and detect at 5 FPS, not 30
@@ -57,15 +58,34 @@ STATE_CODES = {
 }
 
 
+# THE PROTOCOL CHANNEL. Captured before anything else can touch it, then
+# sys.stdout is pointed at stderr for the rest of the process.
+#
+# Ultralytics prints "Loading ... for OpenVINO inference" to stdout. PaddleOCR
+# prints its model cache paths there. Neither is a bug in those libraries --
+# but this stream is a protocol, and one stray line makes the supervisor log a
+# contract violation and drop the JSON around it. Rather than chasing every
+# library's verbosity flag, take stdout away from all of them: only emit() can
+# reach the real handle, and every print() in this file or any dependency lands
+# on stderr where the supervisor already forwards it as a diagnostic.
+_PROTOCOL = sys.stdout
+sys.stdout = sys.stderr
+
+
 def emit(**event) -> None:
     """One JSON object per line, flushed. The supervisor reads line by line."""
-    json.dump(event, sys.stdout, separators=(",", ":"))
-    sys.stdout.write("\n")
-    sys.stdout.flush()
+    json.dump(event, _PROTOCOL, separators=(",", ":"))
+    _PROTOCOL.write("\n")
+    _PROTOCOL.flush()
 
 
 def now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+    """MILLISECONDS, not seconds. At 5 FPS five consecutive frames fall inside
+    one second, so a second-resolution timestamp makes a track's first and last
+    detection look simultaneous -- and estimateSpeed() then divides by a zero
+    interval, returns null, and every speed in the dashboard is blank with no
+    error anywhere to explain it."""
+    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 def correct_plate(raw: str) -> tuple[str | None, float]:
@@ -111,13 +131,22 @@ DEMO_ROUTE = ["CAM1", "CAM3", "CAM2", "CAM4"]
 DEMO_PLATE = "KA05MR7821"
 
 
+# The REAL tracker emits 64 floats, not 512 -- BoT-SORT's `model: auto` encoder
+# decides that, and swapping the model changes it. Matching the real dimension
+# here means the demo exercises the worker's dimension guard the same way live
+# cameras do, instead of passing on a number nothing else produces.
+DEMO_EMBED_DIM = 64
+
+
 def _demo_embedding(seed: int) -> list[float]:
-    """Deterministic 512-dim vector. Same vehicle -> near-identical vectors, so
+    """Deterministic unit vector. Same vehicle -> near-identical vectors, so
     layer 2 of the association engine fires exactly as it would on real tracker
-    output. 512 here is arbitrary: what matters is that every demo sidecar
-    agrees, which is the same rule the real ones follow."""
+    output. What matters is that every demo sidecar agrees on the dimension,
+    which is the same rule the real ones follow."""
     import math
-    return [round(math.sin((i + 1) * 0.017 + seed), 6) for i in range(512)]
+    raw = [math.sin((i + 1) * 0.017 + seed) for i in range(DEMO_EMBED_DIM)]
+    norm = math.sqrt(sum(v * v for v in raw)) or 1.0
+    return [round(v / norm, 6) for v in raw]
 
 
 def demo(camera: str, fps: int) -> None:
@@ -163,25 +192,300 @@ def demo(camera: str, fps: int) -> None:
     print(f"[{camera}] demo leg {leg} emitted", file=sys.stderr)
 
 
-def run(camera: str, source: str, fps: int) -> None:
-    """Real pipeline. Dev A fills this in; the event shapes above are fixed.
+# ---------------------------------------------------------------- real run --
 
-    Sketch, in the order things happen:
-        cap = cv2.VideoCapture(source); skip frames to hit `fps`
-        # model.track(persist=True, tracker="ml/botsort.yaml") gives boxes,
-        # stable ids AND ReID features in one pass -- do not run a second model.
-        results = vehicle_model.track(frame, persist=True,
-                                      tracker="ml/botsort.yaml", classes=[2,3,5,7])
-        for t in tracks.new_or_low_conf_plate:    # NOT every frame
-            crop = best_crop(t); clahe(crop)
-            plate_raw = ocr(plate_model(crop))
-            t.plate, penalty = correct_plate(plate_raw)
-        for t in tracks.just_exited:              # exit only
-            emit(event="track_closed", embedding=t.reid_feature.tolist(), ...)
+VEHICLE_WEIGHTS = "yolov8n.pt"        # stock COCO: car, motorcycle, bus, truck
+PLATE_CANDIDATES = (
+    "runs/detect/plate/weights/best_openvino_model",
+    "runs/detect/plate/weights/best.pt",
+)
+IMGSZ = 480                            # see CLAUDE.md: cut this before cutting features
+VEHICLE_CONF = 0.35
+PLATE_CONF = 0.25
+
+# A track is closed after this many PROCESSED frames without a sighting. At
+# 5 FPS that is 2 seconds -- long enough to survive an occlusion behind a bus,
+# short enough that the cross-camera match is not delayed past its own window.
+MISS_LIMIT = 10
+
+# OCR budget. Reading every frame would blow the inference budget on its own;
+# these two rules keep a track to a handful of reads regardless of its length.
+PLATE_FIRST_FRAMES = 3                 # early frames, before it drives out of view
+PLATE_MAX_ATTEMPTS = 6                 # hard ceiling per track
+PLATE_GROWTH = 1.4                     # ...plus one retry when the crop gets this
+                                       #    much bigger, i.e. the vehicle came closer
+
+
+def find_plate_weights() -> str | None:
+    """Trained plate detector, if one has been exported. Returns None when it
+    has not: the sidecar must still run end to end on stock weights, or nothing
+    downstream can be developed before the Kaggle run finishes."""
+    from pathlib import Path
+    for c in PLATE_CANDIDATES:
+        if Path(c).exists():
+            return c
+    return None
+
+
+def _colour_hist(crop) -> list[float]:
+    """32-bin hue histogram, normalised. Layer 2's tie-breaker in Module C:
+    cheap, lighting-tolerant, and it costs nothing next to the detector."""
+    import cv2
+    if crop.size == 0:
+        return [0.0] * 32
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    hist = cv2.calcHist([hsv], [0], None, [32], [0, 180]).flatten()
+    total = float(hist.sum()) or 1.0
+    return [round(float(v) / total, 6) for v in hist]
+
+
+# Coarse colour names from mean HSV. Not a classifier -- a label for the UI.
+def _colour_name(crop) -> str | None:
+    import cv2
+    import numpy as np
+    if crop.size == 0:
+        return None
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    h, sat, val = (float(np.median(hsv[:, :, i])) for i in range(3))
+    if val < 50:
+        return "black"
+    if sat < 40:
+        return "white" if val > 170 else "silver"
+    for lo, hi, name in ((0, 10, "red"), (10, 25, "orange"), (25, 35, "yellow"),
+                         (35, 85, "green"), (85, 130, "blue"), (130, 165, "purple")):
+        if lo <= h < hi:
+            return name
+    return "red"
+
+
+class _Track:
+    """Per-track state. Everything expensive is decided here: which frames get
+    an OCR attempt, which crop is the best one, and what gets emitted on exit."""
+
+    __slots__ = ("track_id", "vehicle_type", "entry_time", "last_seen_frame",
+                 "frames", "attempts", "best_area", "plate_text", "plate_conf",
+                 "embedding", "colour", "colour_hist")
+
+    def __init__(self, track_id: str, vehicle_type: str, ts: str, frame_no: int):
+        self.track_id = track_id
+        self.vehicle_type = vehicle_type
+        self.entry_time = ts
+        self.last_seen_frame = frame_no
+        self.frames = 0
+        self.attempts = 0
+        self.best_area = 0.0
+        self.plate_text: str | None = None
+        self.plate_conf: float | None = None
+        self.embedding: list[float] = []
+        self.colour: str | None = None
+        self.colour_hist: list[float] = []
+
+    def wants_ocr(self, area: float) -> bool:
+        if self.plate_conf is not None and self.plate_conf >= 0.9:
+            return False                       # already confident; stop paying
+        if self.attempts >= PLATE_MAX_ATTEMPTS:
+            return False
+        return self.frames <= PLATE_FIRST_FRAMES or area > self.best_area * PLATE_GROWTH
+
+
+def _read_plate(reader, plate_model, crop) -> tuple[str | None, float | None]:
+    """Plate box -> OCR -> positional correction. Returns (plate, confidence).
+
+    The correction penalty is subtracted from the OCR score, so a read that
+    needed four fixes cannot present itself as confidently as a clean one.
     """
-    emit(event="error", camera_id=camera,
-         detail="ml/sidecar.py run() not implemented yet -- see the docstring")
-    raise SystemExit(2)
+    import cv2
+    if crop.size == 0:
+        return None, None
+
+    region = crop
+    if plate_model is not None:
+        res = plate_model(crop, imgsz=IMGSZ, conf=PLATE_CONF, verbose=False)[0]
+        if not len(res.boxes):
+            return None, None
+        box = max(res.boxes, key=lambda b: float(b.conf[0]))
+        x1, y1, x2, y2 = (int(v) for v in box.xyxy[0])
+        region = crop[max(y1, 0):y2, max(x1, 0):x2]
+        if region.size == 0:
+            return None, None
+
+    # Plates arrive small. Upscale and equalise before OCR: at 5 FPS a plate is
+    # often 100x30 px, which PaddleOCR reads poorly at native size.
+    if region.shape[0] < 48:
+        scale = 48 / max(region.shape[0], 1)
+        region = cv2.resize(region, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    grey = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+    region = cv2.cvtColor(
+        cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(grey), cv2.COLOR_GRAY2BGR)
+
+    if reader is None:
+        return None, None
+    try:
+        pages = reader.predict(region)
+    except Exception as exc:
+        print(f"ocr failed: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return None, None
+
+    best_raw, best_score = "", 0.0
+    for page in pages or []:
+        if not isinstance(page, dict):
+            continue
+        texts = page.get("rec_texts") or []
+        scores = page.get("rec_scores") or [0.0] * len(texts)
+        for text, score in zip(texts, scores):
+            if len(text) >= len(best_raw) and float(score) >= best_score:
+                best_raw, best_score = text, float(score)
+    if not best_raw:
+        return None, None
+
+    plate, penalty = correct_plate(best_raw)
+    if plate is None:
+        return None, None
+    return plate, round(max(0.0, min(1.0, best_score - penalty)), 3)
+
+
+def run(camera: str, source: str, fps: int, loop: bool = False) -> None:
+    """The real pipeline: decode -> detect+track -> OCR -> emit.
+
+    Order matters, and so does what is DELIBERATELY not done every frame:
+
+      - vehicle detection + BoT-SORT: every processed frame. One model.track()
+        call gives boxes, stable ids AND ReID features -- never run a second
+        model for the appearance vector.
+      - plate detection + OCR: a few frames per track (see _Track.wants_ocr).
+      - Re-ID embedding: read on track EXIT only. It is the single moment
+        Module C needs it, and the tracker has been maintaining it for free.
+    """
+    import cv2
+    from ultralytics import YOLO
+
+    vehicle_model = YOLO(VEHICLE_WEIGHTS)
+    weights = find_plate_weights()
+    plate_model = YOLO(weights) if weights else None
+    if plate_model is None:
+        print("no trained plate weights; OCR runs on the whole vehicle crop and "
+              "will read few plates. Train on Kaggle, see WORKFLOW.md Stage 1.",
+              file=sys.stderr)
+    else:
+        print(f"plate detector: {weights}", file=sys.stderr)
+
+    reader = None
+    try:
+        from paddleocr import PaddleOCR
+        # enable_mkldnn=False is NOT tuning. Paddle's oneDNN executor raises
+        # ConvertPirAttribute2RuntimeAttribute on this CPU build for every
+        # predict() call, and the constructor gives no hint that it will.
+        reader = PaddleOCR(lang="en", use_textline_orientation=False, enable_mkldnn=False)
+    except Exception as exc:
+        print(f"OCR unavailable ({type(exc).__name__}); tracking only", file=sys.stderr)
+
+    cap = cv2.VideoCapture(source)
+    if not cap.isOpened():
+        emit(event="error", camera_id=camera, detail=f"cannot open source: {source}")
+        raise SystemExit(2)
+
+    src_fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    step = max(1, round(src_fps / max(fps, 1)))
+    print(f"source {src_fps:.0f} fps, processing every {step} frame(s) "
+          f"-> {src_fps / step:.1f} fps", file=sys.stderr)
+
+    tracks: dict[str, _Track] = {}
+    features: dict[str, list[float]] = {}
+    processed = 0
+    raw_no = 0
+
+    def close(key: str, why: str) -> None:
+        t = tracks.pop(key, None)
+        if t is None:
+            return
+        embedding = t.embedding or features.get(key) or []
+        if len(embedding) < 32:
+            # The contract requires a usable vector. Emitting a stub would make
+            # layer 2 compare noise and quietly produce wrong matches, which is
+            # worse than emitting nothing.
+            print(f"track {key} closed with no ReID feature ({why}); dropped",
+                  file=sys.stderr)
+            return
+        emit(event="track_closed", camera_id=camera, track_id=t.track_id,
+             entry_time=t.entry_time, exit_time=now_iso(),
+             vehicle_type=t.vehicle_type, color=t.colour,
+             plate_text=t.plate_text, plate_conf=t.plate_conf,
+             embedding=embedding, color_hist=t.colour_hist or [0.0] * 32)
+
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            if loop and cap.get(cv2.CAP_PROP_POS_FRAMES) > 0:
+                # A file that ends is not a camera that failed. Rewind so a
+                # rehearsal or a demo can run off a clip indefinitely.
+                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                continue
+            break
+        raw_no += 1
+        if raw_no % step:
+            continue
+        processed += 1
+        ts = now_iso()
+
+        result = vehicle_model.track(
+            frame, persist=True, tracker="ml/botsort.yaml",
+            classes=list(VEHICLE_CLASSES), imgsz=IMGSZ, conf=VEHICLE_CONF,
+            verbose=False)[0]
+
+        # Harvest appearance vectors while the tracker still holds them. On exit
+        # the STrack is gone, so caching here is what makes exit-only Re-ID work.
+        tracker = getattr(vehicle_model.predictor, "trackers", [None])[0]
+        for strack in getattr(tracker, "tracked_stracks", []):
+            feat = getattr(strack, "smooth_feat", None)
+            if feat is not None:
+                features[str(int(strack.track_id))] = [round(float(v), 6) for v in feat]
+
+        seen: set[str] = set()
+        boxes = result.boxes
+        if boxes is not None and boxes.id is not None:
+            for box in boxes:
+                key = str(int(box.id[0]))
+                seen.add(key)
+                x1, y1, x2, y2 = (int(v) for v in box.xyxy[0])
+                kind = VEHICLE_CLASSES.get(int(box.cls[0]), "car")
+                conf = round(float(box.conf[0]), 3)
+
+                emit(event="detection", camera_id=camera, track_id=key, ts=ts,
+                     bbox=[x1, y1, x2, y2], conf=conf, vehicle_type=kind)
+
+                t = tracks.get(key)
+                if t is None:
+                    t = tracks[key] = _Track(key, kind, ts, processed)
+                t.last_seen_frame = processed
+                t.frames += 1
+
+                crop = frame[max(y1, 0):y2, max(x1, 0):x2]
+                area = float((x2 - x1) * (y2 - y1))
+                if area > t.best_area:
+                    t.best_area = area
+                    t.colour = _colour_name(crop)
+                    t.colour_hist = _colour_hist(crop)
+                if t.wants_ocr(area):
+                    t.attempts += 1
+                    plate, plate_conf = _read_plate(reader, plate_model, crop)
+                    if plate and (t.plate_conf is None or (plate_conf or 0) > t.plate_conf):
+                        t.plate_text, t.plate_conf = plate, plate_conf
+
+        if feats := features:
+            for key in list(tracks):
+                if key in seen and key in feats:
+                    tracks[key].embedding = feats[key]
+
+        for key in [k for k, t in tracks.items()
+                    if processed - t.last_seen_frame > MISS_LIMIT]:
+            close(key, "left view")
+
+    cap.release()
+    # End of stream is not a reason to lose the tracks still open: their
+    # cross-camera match may be the one the demo is about to show.
+    for key in list(tracks):
+        close(key, "end of stream")
+    print(f"[{camera}] {processed} frames processed", file=sys.stderr)
 
 
 def main() -> None:
@@ -190,6 +494,8 @@ def main() -> None:
     ap.add_argument("--camera", required=True)
     ap.add_argument("--source", required=True, help="video file or RTSP url")
     ap.add_argument("--fps", type=int, default=5, help="process rate, not source rate")
+    ap.add_argument("--loop", action="store_true",
+                    help="rewind a video file at EOF instead of exiting")
     ap.add_argument("--selfcheck", action="store_true")
     args = ap.parse_args()
 
@@ -200,7 +506,7 @@ def main() -> None:
     try:
         if args.source == "demo":
             return demo(args.camera, args.fps)
-        run(args.camera, args.source, args.fps)
+        run(args.camera, args.source, args.fps, loop=args.loop)
     except SystemExit:
         raise
     except Exception as exc:  # never die silently -- the supervisor restarts us
@@ -225,12 +531,48 @@ def _selfcheck() -> None:
     assert correct_plate("KA01MB12345678")[0] is None, "too long"
     assert correct_plate("K#01MB1234")[0] is None, "punctuation strips to wrong length"
 
+    # Colour histogram: normalised, right length, and it must not blow up on an
+    # empty crop -- a zero-area box is what a box clipped at the frame edge gives.
+    import numpy as np
+    hist = _colour_hist(np.zeros((0, 0, 3), np.uint8))
+    assert len(hist) == 32 and sum(hist) == 0.0, hist
+    red = np.zeros((20, 20, 3), np.uint8); red[:, :, 2] = 200
+    hist = _colour_hist(red)
+    assert len(hist) == 32, len(hist)
+    assert abs(sum(hist) - 1.0) < 1e-6, f"histogram must be normalised, got {sum(hist)}"
+    assert _colour_name(red) == "red", _colour_name(red)
+    assert _colour_name(np.zeros((20, 20, 3), np.uint8)) == "black"
+    assert _colour_name(np.full((20, 20, 3), 255, np.uint8)) == "white"
+
+    # Demo and real pipeline must agree on embedding dimension, or the worker's
+    # guard fires the moment a demo camera runs beside a real one.
+    assert len(_demo_embedding(1)) == DEMO_EMBED_DIM
+
+    # The OCR budget is what keeps the CPU inference budget. If wants_ocr ever
+    # returns True unconditionally, the sidecar silently stops meeting 5 FPS.
+    t = _Track("1", "car", now_iso(), 0)
+    t.frames = 1
+    assert t.wants_ocr(100.0), "the first frames of a track must get an attempt"
+    t.frames, t.best_area = 50, 100.0
+    assert not t.wants_ocr(101.0), "a mid-track frame with no growth must not"
+    assert t.wants_ocr(200.0), "a crop that doubled means the vehicle came closer"
+    t.attempts = PLATE_MAX_ATTEMPTS
+    assert not t.wants_ocr(10_000.0), "the per-track attempt ceiling must hold"
+    t.attempts, t.plate_conf = 0, 0.95
+    assert not t.wants_ocr(10_000.0), "a confident read must stop further attempts"
+
+    # emit() must write to the protocol channel, NOT to sys.stdout — that is the
+    # whole point of the split, and a regression here silently corrupts the
+    # stream with whatever a dependency decides to print.
     import io
-    buf, real = io.StringIO(), sys.stdout
-    sys.stdout = buf
+    global _PROTOCOL
+    buf, real = io.StringIO(), _PROTOCOL
+    _PROTOCOL = buf
     emit(event="ready", camera_id="CAM1", fps=5)
-    sys.stdout = real
+    print("a library printing to stdout must NOT land on the protocol channel")
+    _PROTOCOL = real
     line = buf.getvalue()
+    assert line.count("\n") == 1, f"stdout leaked into the protocol channel: {line!r}"
     assert line.endswith("\n") and json.loads(line)["event"] == "ready"
     print("sidecar selfcheck ok", file=sys.stderr)
 

@@ -32,7 +32,7 @@ ml/sidecar.py (one per camera)   ← the only runtime Python
   stdout: {"event":"detection"|"track_closed"|"ready"|"error", ...}
                     │  newline-delimited JSON
 worker/ingest.ts    ▼   spawns + restarts sidecars, validates against contract
-  → Postgres/TimescaleDB, → Redis pub/sub
+  → Postgres/TimescaleDB (src/server/db.ts), → Redis pub/sub (src/server/bus.ts)
                     │
 server.ts           ▼   ONE process: Next UI + /api handlers + /ws upgrade
   src/server/association.ts   Module C ★ (cross-camera, 3-layer)
@@ -111,19 +111,30 @@ say so.**
 ## Commands
 
 ```bash
+docker compose up -d db redis   # TimescaleDB + Redis
+npm run db:setup     # apply db/schema.sql (idempotent) + seed camera topology
 npm run dev          # Next UI + /api + /ws on :3000  (custom server)
 npm run worker       # ingest supervisor + Python sidecars
 npm run check        # tsc --noEmit
 npm run selfcheck    # mock fixtures + Module C + Module D
-docker compose up -d db redis
+npm run smoke        # every endpoint over real HTTP, judged by the zod contract
 
 # End-to-end with no video, no CV deps, no GPU: synthetic sidecars that emit
 # a vehicle travelling CAM1 -> CAM3 -> CAM2 (third leg has no readable plate).
 ARGUS_PYTHON=python3 ARGUS_CAMERAS='CAM1=demo,CAM3=demo' npm run worker
 
 python ml/sidecar.py --selfcheck --camera X --source X   # plate-correction check
+python ml/demo_detect.py --source photo.jpg --ocr        # eyeball the detector
+python ml/make_demo_clips.py                # synthetic demo/cam*.mp4 test clips
 python ml/train_plate.py --epochs 50        # on Kaggle
 python ml/export_onnx.py --weights runs/detect/plate/weights/best.pt
+```
+
+Real video end to end, no Kaggle needed (uses the exported weights if present):
+
+```bash
+python ml/make_demo_clips.py
+ARGUS_CAMERAS='CAM1=demo/cam1.mp4,CAM3=demo/cam3.mp4,CAM2=demo/cam2.mp4' npm run worker
 ```
 
 `next dev` alone boots the UI but **not** `/ws` — always `npm run dev`.
@@ -151,10 +162,51 @@ Measured on this machine: YOLOv8n + BoT-SORT with ReID at `imgsz=480` runs
 — real footage with many detections is slower). The budget is 20 inferences/sec
 across 4 streams, so there is real headroom.
 
-Embedding dimension is therefore **not fixed at 512** — it is whatever that
-model emits. Every camera must emit the same dimension; `worker/ingest.ts`
+Embedding dimension is therefore **not fixed at 512** — measured, this build's
+`model: auto` encoder emits **64** floats. Every camera must emit the same dimension; `worker/ingest.ts`
 checks this and fails loudly, because a mismatch makes cosine similarity return
 0 and layer 2 silently stop firing.
+
+## Data layer
+
+`src/server/db.ts` holds **every** SQL statement in the application. postgres.js
+tagged templates, not an ORM: Timescale's hypertables and `time_bucket()` are
+raw SQL either way, and an ORM schema file would be a second definition of
+`db/schema.sql` free to drift from it — the exact failure `src/contract.ts`
+exists to prevent on the API side.
+
+Every statement in `db/schema.sql` is **idempotent**. The Postgres container
+runs its init scripts only on an empty volume, so without that property a schema
+change cannot be applied without destroying data. `npm run db:setup` is always
+safe to re-run.
+
+The API validates each response against its zod schema **on the way out**. A
+parse costs microseconds and turns "the dashboard renders blank" into a named
+field in the server log.
+
+## Timestamps carry milliseconds
+
+Detections arrive five per second. A whole-second timestamp makes a track's
+first and last frame parse to the same instant, `estimateSpeed()` divides by a
+zero interval and returns null, and **every speed in the system is silently
+blank** with no error to explain it. `ml/sidecar.py:now_iso()` emits
+milliseconds and `src/server/db.ts` keeps them. `analytics.selfcheck.ts` asserts
+both halves.
+
+## The sidecar's stdout is a protocol, not a log
+
+`ml/sidecar.py` captures the real stdout handle at import and points
+`sys.stdout` at stderr. Ultralytics prints "Loading … for OpenVINO inference" to
+stdout and PaddleOCR prints its cache paths there; either line lands mid-stream
+and the supervisor drops the JSON around it. Only `emit()` can reach the
+protocol channel — so no dependency's verbosity setting can ever break the pipe.
+
+## PaddleOCR needs `enable_mkldnn=False`
+
+Not tuning. Paddle's oneDNN executor raises
+`ConvertPirAttribute2RuntimeAttribute` on this CPU build for **every**
+`predict()` call, and the constructor succeeds without a hint. Omit the flag and
+OCR silently reads nothing forever.
 
 ## Conventions
 
@@ -177,11 +229,14 @@ checks this and fails loudly, because a mismatch makes cosine similarity return
 | `src/contract.ts`, `src/server/mock.ts` | Done, selfchecked |
 | `src/server/association.ts` — **Module C ★** | Done, selfchecked |
 | `src/server/analytics.ts` — Module D | Done, selfchecked |
-| `worker/ingest.ts` | Supervises sidecars, validates, associates. DB writes are TODO |
-| `ml/sidecar.py` | Event contract, `correct_plate()`, `--source demo`. `run()` is TODO |
+| `src/server/db.ts`, `src/server/bus.ts` | Done — all SQL, Redis pub/sub |
+| Real `/api/*` routes | Done, contract-validated, smoke-tested |
+| `worker/ingest.ts` | Done — writes, associates, alerts, rollup, publishes |
+| `ml/sidecar.py` | Done — `run()` is the real decode/track/OCR/ReID loop |
+| `test/smoke.ts` | 38 checks incl. a live end-to-end pipeline run |
+| Trained plate weights | Done — mAP50 0.950 on held-out Indian plates |
 | `src/app/(dashboard)` | Not started — Dev B |
-| Real `/api/*` routes, Drizzle layer | Not started — Dev A |
-| Trained plate weights | Not started — needs a Kaggle run |
+| Real traffic footage | Not started. `ml/make_demo_clips.py` is a fixture, not the demo |
 
 ## Non-negotiable
 

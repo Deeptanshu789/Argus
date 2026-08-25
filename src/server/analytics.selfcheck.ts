@@ -140,4 +140,29 @@ assert.equal(congestionScore(50, null, 100, 40), 50,
     "zero baseline must not divide by zero");
 }
 
+
+// A track at the real 5 FPS processing rate must produce a speed. Sub-second
+// timestamps are the only reason it can: with whole-second precision the first
+// and last frame of a short track parse to the same instant, estimateSpeed
+// divides by zero, and EVERY speed in the system is silently null.
+{
+  const t0 = Date.parse("2026-01-01T00:00:00.000Z");
+  const rows: DetectionRow[] = [0, 1, 2, 3, 4].map((i) => ({
+    ts: new Date(t0 + i * 200).toISOString(),           // 5 FPS
+    camera_id: "CAM1",
+    track_id: "T1",
+    bbox: [100 + i * 20, 100, 160 + i * 20, 140] as [number, number, number, number],
+    vehicle_type: "car" as const,
+  }));
+  const kmh = estimateSpeed(rows, { metersPerPixel: 0.05 });
+  assert(kmh !== null, "a 5 FPS track must yield a speed — check timestamp precision");
+  // 80 px over 0.8 s at 0.05 m/px = 5 m/s = 18 km/h.
+  assert(Math.abs(kmh! - 18) < 0.5, `expected ~18 km/h, got ${kmh}`);
+
+  const truncated = rows.map((r) => ({ ...r, ts: r.ts.replace(/\.\d{3}Z$/, "Z") }));
+  assert(estimateSpeed(truncated, { metersPerPixel: 0.05 }) === null,
+    "second-resolution timestamps DO collapse the interval — this is the bug the " +
+    "millisecond precision above exists to prevent, and it must stay demonstrated");
+}
+
 console.log("analytics selfcheck ok");

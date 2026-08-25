@@ -24,3 +24,6 @@ next-env.d.ts
 .env.local
 tsconfig.tsbuildinfo
 ml/demo_out/
+
+# Synthetic test clips from ml/make_demo_clips.py — regenerate, never commit.
+demo/*.mp4

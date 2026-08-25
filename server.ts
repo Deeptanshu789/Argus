@@ -8,12 +8,15 @@
  *
  * Video inference does NOT run here. It runs in worker/ingest.ts, out of
  * process, because a CPU-pinned decode loop in this process would stall the
- * dashboard — exactly what a live demo cannot afford.
+ * dashboard — exactly what a live demo cannot afford. The worker reaches this
+ * process through Redis pub/sub, and every message it publishes is relayed to
+ * the connected browsers unchanged.
  */
 import { createServer } from "node:http";
 import next from "next";
 import { WebSocketServer, type WebSocket } from "ws";
 import { mockEvents } from "@/server/mock";
+import { subscribe } from "@/server/bus";
 import type { ServerMessage } from "@/contract";
 
 const dev = process.env.NODE_ENV !== "production";
@@ -23,7 +26,8 @@ const handle = app.getRequestHandler();
 
 const clients = new Set<WebSocket>();
 
-/** The hub. worker/ingest.ts feeds this via Redis once the real pipeline lands. */
+/** The hub. Fed by the ingest worker over Redis, and by the canned loop below
+ *  while MOCK is on. */
 export function broadcast(msg: ServerMessage) {
   const payload = JSON.stringify(msg);
   for (const c of clients) if (c.readyState === c.OPEN) c.send(payload);
@@ -45,14 +49,20 @@ wss.on("connection", (ws) => {
   ws.on("error", () => clients.delete(ws));
 });
 
-// Mock event loop. Delete this block when the real pipeline feeds broadcast().
-if (process.env.MOCK !== "0") {
+// The live feed: whatever the worker publishes reaches every browser.
+subscribe(broadcast);
+
+// Canned event loop, for building the UI with no pipeline running.
+// MOCK=0 turns it off; leaving it on alongside a live worker means the map
+// shows both real and invented traffic, which is not what you want in a demo.
+const mock = process.env.MOCK !== "0";
+if (mock) {
   void (async () => {
     for await (const msg of mockEvents()) if (clients.size) broadcast(msg);
   })();
 }
 
 server.listen(port, () => {
-  console.log(`argus  http://localhost:${port}   ws://localhost:${port}/ws` +
-              `   mock=${process.env.MOCK !== "0"}`);
+  console.log(`argus  http://localhost:${port}   ws://localhost:${port}/ws`);
+  console.log(`  live events: redis  |  canned events: ${mock ? "ON (MOCK=0 to stop)" : "off"}`);
 });
