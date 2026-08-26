@@ -434,6 +434,14 @@ PLATE_GROWTH = 1.25                    # ...plus a retry each time the crop grow
 # property of how many pixels fall on the plate, so a 4K camera reading the same
 # car at the same distance genuinely does have more to work with.
 #
+# Re-measured on the same clip after the reader was fixed: the narrowest vehicle
+# that produced a read moved from 124 px to 190, and 66% of crops now fall below
+# it. Raising the gate to around 150 would skip more attempts that cannot
+# succeed. NOT TAKEN, because that floor is one clip at one resolution and the
+# stage it would save is no longer the expensive one -- OCR went from 722 ms per
+# attempt to 166. The figure is recorded so the next person has it; raise this
+# only with a second clip agreeing.
+#
 # ponytail: a single width threshold. A vehicle-type-aware one would help — a
 # motorcycle plate is legible at a narrower crop than a truck's — if plate
 # reading on two-wheelers ever becomes the limit.
