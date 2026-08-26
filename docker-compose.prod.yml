@@ -1,0 +1,96 @@
+# Production stack for a VPS. Four containers, one command.
+#
+#   cp .env.production.example .env.production   # then edit it
+#   docker compose -f docker-compose.prod.yml --env-file .env.production up -d --build
+#
+# Only Caddy is published. The app, the worker and the database talk over the
+# compose network and are unreachable from the internet — the app deliberately
+# does NOT map port 3000, because it has no authentication of its own and
+# publishing it would route straight around the password.
+
+services:
+  db:
+    image: timescale/timescaledb:latest-pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-argus}
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env.production}"
+      POSTGRES_DB: ${POSTGRES_DB:-argus}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      # Runs only on an EMPTY volume. Every statement in it is idempotent, so
+      # `npm run db:setup` remains the way to apply a schema change later.
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-argus}"]
+      interval: 5s
+      retries: 20
+    # Not published. Reach it with `docker compose exec db psql`.
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-argus}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-argus}
+      PORT: "3000"
+      # The canned event loop invents traffic. On a real deployment that is a
+      # dashboard showing vehicles nobody filmed.
+      MOCK: "0"
+      NEXT_PUBLIC_MOCK: "0"
+    volumes:
+      # Operator video. Shared with the worker, which decodes it.
+      - uploads:/app/uploads
+    depends_on:
+      db: { condition: service_healthy }
+
+  worker:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-argus}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-argus}
+      ARGUS_PYTHON: python3
+      # Where the worker fetches a paired phone's MJPEG. INTERNAL, so it never
+      # goes through Caddy and never needs the operator password.
+      ARGUS_SERVER: http://app:3000
+      # Live cameras, if any. Leave empty on a VPS with no video files: uploads
+      # and paired devices are discovered from the database instead.
+      ARGUS_CAMERAS: ${ARGUS_CAMERAS:-}
+    volumes:
+      - uploads:/app/uploads
+      # Trained weights live outside the image: they are gitignored, they are
+      # large, and swapping a model should not mean rebuilding a container.
+      - ./runs:/app/runs:ro
+    depends_on:
+      app: { condition: service_started }
+      db: { condition: service_healthy }
+    # Inference is CPU-bound and will happily eat the whole box. Leave the web
+    # tier something to answer requests with.
+    cpus: ${WORKER_CPUS:-2.0}
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      ARGUS_SITE: "${ARGUS_SITE:-:443}"
+      ARGUS_TLS: "${ARGUS_TLS:-internal}"
+      ARGUS_USER: "${ARGUS_USER:-argus}"
+      ARGUS_PASSWORD_HASH: "${ARGUS_PASSWORD_HASH:?generate one with caddy hash-password}"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      app: { condition: service_started }
+
+volumes:
+  pgdata:
+  uploads:
+  caddy_data:
+  caddy_config:

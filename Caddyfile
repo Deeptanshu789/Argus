@@ -1,0 +1,64 @@
+# Reverse proxy and TLS for a VPS deployment.
+#
+# Two jobs. First, HTTPS — without it a phone will not hand its camera to the
+# pair page at all, because getUserMedia is only exposed in a secure context.
+# Second, a password, because nothing in Argus itself authenticates anyone and
+# an open deployment is an open video-upload endpoint.
+#
+# Two variables choose the certificate, both set in .env.production:
+#
+#   with a domain     ARGUS_SITE=argus.example.com   ARGUS_TLS=you@example.com
+#                     a real Let's Encrypt certificate, no warning anywhere
+#
+#   IP address only   ARGUS_SITE=:443                ARGUS_TLS=internal
+#                     Caddy's own CA; every browser warns once, then works
+#
+# Let's Encrypt will not issue for a bare IP, so the second is not a shortcut —
+# it is the only option until a domain points here.
+
+{$ARGUS_SITE::443} {
+	tls {$ARGUS_TLS:internal}
+	encode gzip
+
+	# Ordered handle blocks. The FIRST match wins and they are mutually
+	# exclusive, which is what keeps the password rule and the exemptions from
+	# contradicting each other — an earlier version applied basic auth with a
+	# `not path` matcher and locked the phone out of the one API call its pair
+	# page makes.
+
+	# Everything a PHONE needs, and nothing more. A phone is held by whoever is
+	# pointing it at the road; making them type an operator password on a
+	# handset defeats the point of a pair link.
+	#
+	# What this leaves open: pushing video INTO a camera slot whose
+	# six-character code you already know. It reads nothing back — no plates,
+	# no tracks, no journeys, no device list.
+	@pair path /cam/* /ws/cam* /_next/* /favicon.ico
+	handle @pair {
+		reverse_proxy app:3000
+	}
+
+	# The single lookup the pair page makes, to show which camera a code is for.
+	# `/api/devices` with no code is the whole device list and is NOT this.
+	@pair_lookup {
+		method GET
+		path_regexp ^/api/devices/[A-Za-z0-9]{4,12}$
+	}
+	handle @pair_lookup {
+		reverse_proxy app:3000
+	}
+
+	# The dashboard, the API, the event WebSocket, uploads: operator only.
+	handle {
+		basic_auth {
+			# docker run --rm caddy caddy hash-password --plaintext 'yours'
+			{$ARGUS_USER:argus} {$ARGUS_PASSWORD_HASH}
+		}
+		reverse_proxy app:3000
+	}
+
+	log {
+		output stdout
+		format console
+	}
+}

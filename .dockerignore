@@ -1,0 +1,18 @@
+# Keeps the build context small and, more importantly, keeps secrets and local
+# state out of the images.
+.git
+node_modules
+.next
+.env.local
+.env.production
+.certs
+uploads
+datasets
+demo/*.mp4
+ml/demo_out
+__pycache__
+*.pyc
+.venv
+# runs/ is BIND-MOUNTED in production, not copied in: weights are large and
+# swapping a model should not mean rebuilding a container.
+runs

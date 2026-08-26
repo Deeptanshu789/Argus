@@ -5,7 +5,8 @@ Smart India Hackathon problem statement **SIH26127**, org **Bharat Electronics
 Limited (BEL)**. 36-hour build, 2 people.
 
 Full docs: <https://github.com/Deeptanshu789/Argus/wiki>
-Runbook: `WORKFLOW.md`. Original strategy doc: `sih26127_implementation_plan.md`.
+Runbook: `WORKFLOW.md`. VPS deployment: `DEPLOY.md`.
+Original strategy doc: `sih26127_implementation_plan.md`.
 
 ## The stack is TypeScript. Python is quarantined.
 
@@ -254,6 +255,7 @@ sudo ./scripts/postgres-local.sh   # native Postgres 16 + TimescaleDB, once
 npm run db:setup     # apply db/schema.sql (idempotent) + seed camera topology
 npm run dev          # Next UI + /api + /ws on :3000  (custom server)
 npm run worker       # ingest supervisor + Python sidecars
+npm run worker:watch # same, restarting on edit (reloads every model: slow)
 npm run check        # tsc --noEmit
 npm run selfcheck    # mock fixtures + Module C + Module D
 npm run smoke        # every endpoint over real HTTP, judged by the zod contract
@@ -380,6 +382,21 @@ OCR silently reads nothing forever.
 | Trained plate weights | Done — 35/45 plates read correctly (78%) |
 | `src/app/(dashboard)` | Done — live, map, analytics, search, upload, devices |
 | Real traffic footage | Upload it at `/upload` — no code change needed |
+
+## Deployment
+
+`DEPLOY.md`, `docker-compose.prod.yml`, `Caddyfile`. Four containers; only Caddy
+binds a public port. Two things that must stay true:
+
+- **Argus authenticates nobody.** Caddy's basic auth is the entire access
+  control. Never publish port 3000 — that routes around it.
+- **`/cam/<code>` is deliberately open**, so a phone pairs by link without an
+  operator password typed on a handset. The code guards pushing video IN; it
+  reads nothing back out.
+
+`./scripts/deploy-prepare.sh` generates the secrets and checks the box can run
+this. Weights are not in the image: `runs/` is bind-mounted, so a model swap is
+a restart rather than a rebuild.
 
 ## Non-negotiable
 

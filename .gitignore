@@ -39,3 +39,6 @@ uploads/
 
 # Self-signed certificate for the HTTPS dev proxy. Never committed.
 .certs/
+
+# Production secrets: database password, operator password hash.
+.env.production
