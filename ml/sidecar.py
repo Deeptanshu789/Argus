@@ -1176,6 +1176,26 @@ def _selfcheck() -> None:
     line = buf.getvalue()
     assert line.count("\n") == 1, f"stdout leaked into the protocol channel: {line!r}"
     assert line.endswith("\n") and json.loads(line)["event"] == "ready"
+    # make_reader() is the only place a PaddleOCR is built, and that is the
+    # whole point of it: five scripts used to carry their own copy of these
+    # arguments, so a number measured by one did not necessarily describe what
+    # the sidecar ran. Checked by reading the source rather than by importing
+    # paddle, because this selfcheck must run with no models present.
+    from pathlib import Path as _Path
+    here = _Path(__file__).parent
+    # Assembled at runtime so this line does not match itself.
+    needle = "PaddleOCR" + "("
+    strays = []
+    for f in sorted(here.glob("*.py")):
+        n = f.read_text().count(needle)
+        if f.name == "sidecar.py":
+            n -= 1                              # the one inside make_reader
+        if n > 0:
+            strays.append(f.name)
+    assert not strays, (
+        f"{strays} construct PaddleOCR directly; call make_reader() instead, "
+        f"or a measurement taken there will not describe what the sidecar runs")
+
     print("sidecar selfcheck ok", file=sys.stderr)
 
 
