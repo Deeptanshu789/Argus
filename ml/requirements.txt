@@ -17,7 +17,7 @@
 
 ultralytics>=8.3        # detection AND tracking AND Re-ID embeddings, see below
 lap>=0.5.12             # BoT-SORT's assignment solver
-paddleocr>=3.0
+paddleocr>=3.7          # PP-OCRv6; see OCR_VERSION in ml/sidecar.py
 paddlepaddle>=3.0
 openvino>=2024.0
 numpy>=1.26

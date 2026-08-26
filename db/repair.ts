@@ -24,9 +24,14 @@
  *              before it did are still stored, and they put cameras the
  *              operator never uploaded on their results page.
  *
- * Deletes trajectories, and the small number of TRACKS that are themselves
- * impossible. Detections are untouched: an observation is real even when the
- * track it was filed under is not.
+ * Deletes trajectories, the matches that reference them, and the small number
+ * of TRACKS that are themselves impossible. Detections are untouched: an
+ * observation is real even when the track it was filed under is not.
+ *
+ * The dry run lists everything --apply will remove, including trajectories that
+ * are valid in themselves but stitched from a poisoned track (STITCHED below).
+ * Those never show up as CYCLE or BACKWARDS, and a preview that omitted them
+ * would under-report the damage.
  *
  * An impossible track is one whose exit time is more than an hour after its
  * entry. A track closes after MISS_LIMIT frames without a sighting -- two
@@ -91,28 +96,58 @@ for (const t of impossible) {
               `spans ${Number(t.hours).toFixed(1)} h`);
 }
 
+const trackIds = impossible.map((t) => t.id);
+
+/**
+ * Trajectories that are stitched FROM a poisoned track but whose own ordering
+ * happens to come out valid, so they never appear in `bad`.
+ *
+ * They are counted separately and BEFORE anything is deleted, because a
+ * destructive script that reports fewer rows than it removes is worse than one
+ * that reports nothing: the operator checks the dry run, sees one trajectory,
+ * and loses six.
+ */
+const collateral = trackIds.length
+  ? (await sql<{ id: string }[]>`
+      SELECT id FROM trajectories
+       WHERE track_ids && ${trackIds}::bigint[]
+         AND NOT (id = ANY(${bad.map((t) => t.id)}::bigint[]))`).map((r) => r.id)
+  : [];
+
+const doomedMatches = trackIds.length
+  ? Number((await sql<{ n: number }[]>`
+      SELECT count(*)::int n FROM matches
+       WHERE from_track = ANY(${trackIds}::bigint[])
+          OR to_track   = ANY(${trackIds}::bigint[])`)[0]!.n)
+  : 0;
+
+for (const id of collateral) {
+  console.log(`  STITCHED   trajectory ${id}: built on an impossible track`);
+}
+
 const total = bad.length + impossible.length;
 if (total === 0) {
   console.log("nothing to repair");
-} else if (apply) {
-  if (bad.length) {
-    await sql`DELETE FROM trajectories WHERE id = ANY(${bad.map((t) => t.id)}::bigint[])`;
-  }
-  if (impossible.length) {
-    const ids = impossible.map((t) => t.id);
-    // Anything stitched FROM a poisoned track is poisoned too, whether or not
-    // its own ordering happened to come out valid.
-    await sql`DELETE FROM trajectories
-               WHERE track_ids && ${ids}::bigint[]`;
-    // matches has a foreign key onto tracks, so it goes first.
-    await sql`DELETE FROM matches
-               WHERE from_track = ANY(${ids}::bigint[])
-                  OR to_track   = ANY(${ids}::bigint[])`;
-    await sql`DELETE FROM tracks WHERE id = ANY(${ids}::bigint[])`;
-  }
-  console.log(`\ndeleted ${bad.length} trajectory(ies) and ${impossible.length} track(s)`);
 } else {
-  console.log(`\n${total} invalid. Re-run with --apply to delete them.`);
+  const plan =
+    `${bad.length + collateral.length} trajectory(ies), ` +
+    `${doomedMatches} match(es), ${impossible.length} track(s)`;
+  if (apply) {
+    if (bad.length) {
+      await sql`DELETE FROM trajectories WHERE id = ANY(${bad.map((t) => t.id)}::bigint[])`;
+    }
+    if (trackIds.length) {
+      await sql`DELETE FROM trajectories WHERE track_ids && ${trackIds}::bigint[]`;
+      // matches has a foreign key onto tracks, so it goes first.
+      await sql`DELETE FROM matches
+                 WHERE from_track = ANY(${trackIds}::bigint[])
+                    OR to_track   = ANY(${trackIds}::bigint[])`;
+      await sql`DELETE FROM tracks WHERE id = ANY(${trackIds}::bigint[])`;
+    }
+    console.log(`\ndeleted ${plan}`);
+  } else {
+    console.log(`\nwould delete ${plan}. Re-run with --apply.`);
+  }
 }
 
 await sql.end();

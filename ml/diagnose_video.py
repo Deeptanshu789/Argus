@@ -54,7 +54,10 @@ def main() -> None:
     args = ap.parse_args()
 
     if args.imgsz is not None:
-        S.VEHICLE_IMGSZ = args.imgsz
+        # THE PLATE detector, which is what this tool exists to sweep -- the
+        # advice it prints when plate boxes are being missed is "try --imgsz
+        # 960". Setting the vehicle size instead made that advice a no-op.
+        S.PLATE_IMGSZ = args.imgsz
     if args.plate_conf is not None:
         S.PLATE_CONF = args.plate_conf
     if args.pad is not None:
@@ -67,7 +70,8 @@ def main() -> None:
     weights = args.model or S.find_plate_weights()
     plate_model = YOLO(weights) if weights else None
     print(f"plate detector : {weights}")
-    print(f"imgsz {S.VEHICLE_IMGSZ}  plate_conf {S.PLATE_CONF}  pad {S.PLATE_PAD}\n")
+    print(f"vehicle imgsz {S.VEHICLE_IMGSZ}  plate imgsz {S.PLATE_IMGSZ}  "
+          f"plate_conf {S.PLATE_CONF}  pad {S.PLATE_PAD}\n")
 
     reader = S.make_reader()
 

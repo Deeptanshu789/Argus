@@ -244,11 +244,24 @@ def ahash(path: Path) -> str | None:
     if img is None:
         return None
     small = cv2.resize(img, (8, 8), interpolation=cv2.INTER_AREA)
-    mean = small.mean()
-    bits = 0
-    for v in small.flatten():
-        bits = (bits << 1) | int(v > mean)
-    return f"{bits:016x}"
+
+    def bits_of(cell) -> int:
+        mean = cell.mean()
+        bits = 0
+        for v in cell.flatten():
+            bits = (bits << 1) | int(v > mean)
+        return bits
+
+    # The smaller of the image and its mirror, so a horizontally flipped copy
+    # hashes to the same value. Flipping is the commonest augmentation these
+    # datasets apply, and an augmented pair landing on opposite sides of the
+    # split is the leak this function exists to prevent. Comparing against the
+    # cell's own mean already makes it invariant to a brightness shift.
+    #
+    # ponytail: does NOT survive a crop or a rotation, which change the 8x8
+    # grid itself. If a merge is measured to be letting augmented pairs
+    # through, that is the next thing to reach for -- not a bigger hash.
+    return f"{min(bits_of(small), bits_of(small[:, ::-1])):016x}"
 
 
 def dedupe(pairs: list[tuple[Path, list[Box]]]) -> tuple[list[tuple[Path, list[Box]]], int]:
@@ -298,8 +311,14 @@ def main() -> None:
                     help="one or more downloaded dataset roots, merged in the "
                          "order given; on a duplicate image the earlier one wins")
     ap.add_argument("--dst", type=Path, default=Path("datasets/plates"))
-    ap.add_argument("--subset", type=int, default=3000, help="train images")
-    ap.add_argument("--val", type=int, default=400)
+    ap.add_argument("--subset", type=int, default=3000,
+                    help="train images; 0 means everything left after --val, "
+                         "which is what you want when merging sources whose "
+                         "combined size you do not know in advance")
+    ap.add_argument("--val", type=int, default=400,
+                    help="validation images. Capped at a fifth of what is "
+                         "available, because an absolute count against an "
+                         "unknown merged total can swallow the training set")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--no-dedupe", dest="dedupe", action="store_false",
                     help="keep repeated photographs. Only for measuring what "
@@ -345,9 +364,18 @@ def main() -> None:
         print(f"merged: {len(pairs)} images")
 
     random.Random(args.seed).shuffle(pairs)
-    val = pairs[: args.val]
-    train = pairs[args.val : args.val + args.subset]
-    if len(train) < args.subset:
+
+    # An absolute --val against a merged total nobody knew in advance is how a
+    # 3,000-image merge ends up 2,000 val and 1,000 train, reported only as a
+    # warning about the subset that scrolls past.
+    val_n = min(args.val, max(1, len(pairs) // 5))
+    if val_n < args.val:
+        print(f"--val {args.val} is more than a fifth of {len(pairs)} images; "
+              f"using {val_n}")
+
+    val = pairs[:val_n]
+    train = pairs[val_n:] if args.subset == 0 else pairs[val_n : val_n + args.subset]
+    if args.subset and len(train) < args.subset:
         print(f"warning: only {len(train)} train images available, wanted {args.subset}")
     if not train:
         raise SystemExit("no training images left after the val split -- lower --val")
@@ -533,6 +561,22 @@ def _selfcheck() -> None:
         dup = merged + sorted(find_pairs(c)[0].items())
         kept, dropped = dedupe(dup)
         assert dropped == 1, f"a re-encoded copy must be caught, dropped {dropped}"
+
+        # A horizontally flipped copy is the commonest augmentation these
+        # datasets apply, and it is the same photograph.
+        fl = root / "srcFlip"; (fl / "images").mkdir(parents=True); (fl / "labels").mkdir()
+        cv2.imwrite(str(fl / "images" / "mirror.jpg"),
+                    cv2.imread(str(a / "images" / "0001.jpg"))[:, ::-1])
+        (fl / "labels" / "mirror.txt").write_text("0 0.5 0.5 0.2 0.1\n")
+        _, flipped = dedupe(merged + sorted(find_pairs(fl)[0].items()))
+        assert flipped == 1, f"a mirrored copy must be caught, dropped {flipped}"
+
+        # ...and two genuinely different photographs still must not collide.
+        d2 = root / "srcDiff"; (d2 / "images").mkdir(parents=True); (d2 / "labels").mkdir()
+        photo(d2 / "images" / "other.jpg", 5)
+        (d2 / "labels" / "other.txt").write_text("0 0.5 0.5 0.2 0.1\n")
+        _, none_dropped = dedupe(merged + sorted(find_pairs(d2)[0].items()))
+        assert none_dropped == 0, "distinct photographs must survive the mirror test"
         assert len(kept) == 2
         assert kept[0][0].parent.parent.name == "srcA", \
             "the earlier --src must be the copy that is kept"

@@ -258,8 +258,10 @@ Roboflow][ds]) are in `ml/TRAINING.md`. `ml/prepare_dataset.py` takes several
 `--src` directories and merges them into one YOLO set, dropping repeated
 photographs by perceptual hash first — public plate datasets are largely
 re-uploads of each other, and the same image in train and val inflates val mAP
-silently. The two sets on this machine merge to **10,985 unique images** with
-411 duplicates removed.
+silently. The hash is mirror-invariant, because a horizontal flip is the
+commonest augmentation these sets apply and it is the same photograph. The two
+sets on this machine merge to **10,098 unique images** with **1,298 duplicates
+removed, 11%** — 887 of those are flips that a plain hash let through.
 
 [ds]: https://universe.roboflow.com/quobotic/indian-number-plate
 

@@ -42,8 +42,10 @@ def main() -> None:
     ap.add_argument("--fps", type=int, default=5)
     ap.add_argument("--imgsz", type=int, default=None, help="override VEHICLE_IMGSZ")
     ap.add_argument("--no-ocr", action="store_true", help="cost of tracking alone")
-    ap.add_argument("--grab", action="store_true",
-                    help="decode skipped frames with grab() instead of read()")
+    ap.add_argument("--no-grab", dest="grab", action="store_false",
+                    help="decode skipped frames with read() instead of grab(). "
+                         "The sidecar always uses grab(); this exists only to "
+                         "measure what that is worth")
     args = ap.parse_args()
 
     if args.imgsz:

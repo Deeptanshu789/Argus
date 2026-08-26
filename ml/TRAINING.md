@@ -8,8 +8,8 @@ this machine at `~/indian-plates`: 2,573 labelled images, 2,594 boxes.
 
 **No single public Indian plate dataset is large enough.** `ml/prepare_dataset.py`
 merges several into one training set — see "Route C". Merged from the two
-already on this machine: **10,985 unique images**, after 411 duplicates were
-removed.
+already on this machine: **10,098 unique images**, after 1,298 duplicates were
+removed -- 11% of the input, most of them mirror-augmented copies.
 
 Three routes: **A, Kaggle GPU** (recommended, ~20 min end to end); **B, this
 laptop's CPU** (~1 h); **C, merge several datasets and fine-tune the detector
@@ -483,7 +483,7 @@ debug at hour 30.
 ```bash
 ./.venv/bin/python ml/prepare_dataset.py \
     --src ~/indian-plates ~/kaggle-plates datasets/plates \
-    --dst datasets/plates-merged --subset 12000 --val 1200
+    --dst datasets/plates-merged --subset 0 --val 1200
 ```
 
 Order matters: on a duplicate image the **earliest `--src` wins**, so put the
@@ -494,10 +494,16 @@ What it prints, and why each line is there:
 ```
 [0] /home/deep/indian-plates: YOLO annotations, 2573 labelled images, 2594 boxes
 [1] datasets/plates: YOLO annotations, 8823 labelled images, 9155 boxes
-dropped 411 repeated image(s) of 11396 (4%) -- the same photograph in more than one source
-merged: 10985 images
-9785 train / 1200 val -> datasets/plates-merged/data.yaml
+dropped 1298 repeated image(s) of 11396 (11%) -- the same photograph in more than one source
+merged: 10098 images
+8898 train / 1200 val -> datasets/plates-merged/data.yaml
 ```
+
+`--subset 0` means "everything left after the validation split"; an absolute
+figure is a number nobody can know before the merge runs. `--val` is capped at a
+fifth of what is available, because an absolute validation count against an
+unknown merged total is how a 3,000-image merge becomes 2,000 val and 1,000
+train.
 
 - **The format per source.** If one says COCO and you expected YOLO, that is the
   moment to notice, not after training.
@@ -505,8 +511,11 @@ merged: 10985 images
   another. A photograph in train and again in val means the model is validated
   on an image it was trained on: val mAP rises and every number downstream is
   quietly wrong. Deduplication runs *before* the split, by perceptual hash, so a
-  re-encoded copy under a different name is still caught. 4% here, within a
-  single source as well as across two.
+  re-encoded copy under a different name is still caught, as is a mirrored one
+  -- flipping is the commonest augmentation these datasets apply. **11% here**,
+  and within a single source as well as across two. It was 4% before the hash
+  was made mirror-invariant: 887 of these 11,396 images are a left-right flip
+  of another one.
 - **Images per source.** A source contributing far fewer images than it contains
   usually means unreadable annotations, not a small dataset.
 
@@ -666,7 +675,7 @@ Five of six current failures are OCR, not detection. In rough order of value:
    every number in this file trustworthy, and it is an afternoon of typing.
    `ml/groundtruth_test50.csv` shows the format, and `ml/groundtruth_kiit.csv`
    shows the same for a video, one line per vehicle rather than per track.
-3. **Train on several datasets at once.** Route C. 10,985 unique images from the
+3. **Train on several datasets at once.** Route C. 10,098 unique images from the
    two already on this machine, and more from the table above.
 4. **Tune `PLATE_PAD`.** Already worth 62% → 78% once. Free, and it must be
    redone whenever the detector changes.

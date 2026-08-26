@@ -474,22 +474,15 @@ PLATE_AGREE_STOP = 2
                                        #    much bigger, i.e. the vehicle came closer
 
 
-def _first_present(candidates) -> str | None:
-    from pathlib import Path
-    for c in candidates:
-        if Path(c).exists():
-            return c
-    return None
-
-
 def find_plate_weights() -> str | None:
     """Trained plate detector, if one has been exported. Returns None when it
     has not: the sidecar must still run end to end on stock weights, or nothing
     downstream can be developed before the Kaggle run finishes."""
-    return _first_present(PLATE_CANDIDATES)
-
-
-
+    from pathlib import Path
+    for c in PLATE_CANDIDATES:
+        if Path(c).exists():
+            return c
+    return None
 
 
 def _colour_hist(crop) -> list[float]:
@@ -716,15 +709,26 @@ def make_reader():
         # 16. Together they oversubscribe before a second camera even starts.
         if _THREADS and _THREADS.isdigit():
             kw["cpu_threads"] = int(_THREADS)
-        return PaddleOCR(
+        common = dict(
             lang="en",
-            ocr_version=OCR_VERSION,
             use_textline_orientation=False,
             use_doc_orientation_classify=False,
             use_doc_unwarping=False,
             enable_mkldnn=False,
             **kw,
         )
+        try:
+            return PaddleOCR(ocr_version=OCR_VERSION, **common)
+        except ValueError as exc:
+            # paddleocr refuses an ocr_version it does not know, and an install
+            # that predates PP-OCRv6 is the likely reason. Reading plates with
+            # the installed default is far better than the alternative, which
+            # was this whole function returning None and the sidecar tracking
+            # vehicles it can never identify. Loud, because accuracy drops.
+            print(f"OCR: {exc}. Falling back to this paddleocr's default "
+                  f"recogniser -- expect fewer plates read. Upgrade paddleocr "
+                  f"to get {OCR_VERSION}.", file=sys.stderr)
+            return PaddleOCR(**common)
     except Exception as exc:
         print(f"OCR unavailable ({type(exc).__name__}: {exc})", file=sys.stderr)
         return None
@@ -1203,10 +1207,16 @@ def _selfcheck() -> None:
     needle = "PaddleOCR" + "("
     strays = []
     for f in sorted(here.glob("*.py")):
-        n = f.read_text().count(needle)
+        text = f.read_text()
         if f.name == "sidecar.py":
-            n -= 1                              # the one inside make_reader
-        if n > 0:
+            # Cut make_reader's own body out rather than subtracting a count:
+            # the count changed the moment the function grew a fallback path,
+            # and a check that needs updating when the code it guards changes
+            # is a check that will be deleted the next time it is in the way.
+            start = text.index("def make_reader(")
+            end = text.index("\ndef ", start)
+            text = text[:start] + text[end:]
+        if needle in text:
             strays.append(f.name)
     assert not strays, (
         f"{strays} construct PaddleOCR directly; call make_reader() instead, "
