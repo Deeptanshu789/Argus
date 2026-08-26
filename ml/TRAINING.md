@@ -1,9 +1,15 @@
 # Training the plate detector
 
-Dataset: **[Indian number plate, by Quobotic][ds]** on Roboflow Universe.
-1,683 images, one class (`IndianNumberPlate`), CC BY 4.0, dataset version 1.
+Primary dataset: **[Indian number plate, by Quobotic][ds]** on Roboflow
+Universe. One class (`IndianNumberPlate`), CC BY 4.0. Version 3 is what is on
+this machine at `~/indian-plates`: 2,573 labelled images, 2,594 boxes.
 
 [ds]: https://universe.roboflow.com/quobotic/indian-number-plate
+
+**No single public Indian plate dataset is large enough.** `ml/prepare_dataset.py`
+merges several into one training set — see "Route C". Merged from the two
+already on this machine: **10,985 unique images**, after 411 duplicates were
+removed.
 
 Two routes: **Kaggle GPU** (recommended, ~20 min end to end) and **this
 laptop's CPU** (~1 h). Same dataset, same script, same output. Pick one.
@@ -14,20 +20,67 @@ seeing 15% of its data.
 
 ---
 
+## More data: which datasets, and what each is for
+
+Two things are being trained here and they need different data.
+
+A **detector** needs whole photographs with a box round the plate. That is what
+Routes A, B and C train, and what everything below marked *detection* feeds.
+
+A **reader** needs plate crops with the registration as a text label. Nothing
+in this project trains one yet, and it is the piece that would fix the errors
+the system still makes — every remaining mistake on real footage is `O` read for
+`D` or `Q` in the series letters, where there is no closed set of valid answers
+to check a guess against. The two synthetic sets below exist for exactly that.
+
+Sizes and licences below were read from Kaggle's dataset API on 26 August 2026.
+**The annotation format is not verified** — Kaggle does not publish file
+listings without credentials, and these sets ship as YOLO, COCO, VOC or as bare
+crops with no boxes at all. `ml/prepare_dataset.py` detects which of the three
+box formats it is handed and says so; a set with no boxes gets a message saying
+it trains a reader, not a detector.
+
+| dataset | size | licence | for |
+|---|---|---|---|
+| [`tkm22092/indian-number-plate-images`](https://www.kaggle.com/datasets/tkm22092/indian-number-plate-images) | 1.5 GB | CC0 | detection |
+| [`santoshvishwakarma99/indian-license-plate-dataset`](https://www.kaggle.com/datasets/santoshvishwakarma99/indian-license-plate-dataset) | 756 MB | CC0 | detection |
+| [`gauravsanwal/indian-licence-plate`](https://www.kaggle.com/datasets/gauravsanwal/indian-licence-plate) | 385 MB | unstated | detection, "annotations in txt format" |
+| [`dataclusterlabs/indian-number-plates-dataset`](https://www.kaggle.com/datasets/dataclusterlabs/indian-number-plates-dataset) | 152 MB | CC0 | detection |
+| [`abtexp/synthetic-indian-license-plates`](https://www.kaggle.com/datasets/abtexp/synthetic-indian-license-plates) | 1.0 GB | CC0 | **reader** — all states, all vehicle types |
+| [`raspberrypi5/indian-commercial-vehicle-number-plate`](https://www.kaggle.com/datasets/raspberrypi5/indian-commercial-vehicle-number-plate) | 831 MB | CC BY-NC-SA 4.0 | **reader** — built for TrOCR |
+| [`fareselmenshawii/large-license-plate-dataset`](https://www.kaggle.com/datasets/fareselmenshawii/large-license-plate-dataset) | 2.5 GB | CC0 | detection, not India-specific |
+| [`adilshamim8/license-plate-recognition`](https://www.kaggle.com/datasets/adilshamim8/license-plate-recognition) | 526 MB | CC BY 4.0 | detection, not India-specific |
+
+Two cautions that are worth more than the list.
+
+**Check the licence before it goes in a submission.** CC BY-NC-SA forbids
+commercial use and forces the same licence downstream; CC0 and CC BY do not.
+The one NC set above is marked.
+
+**The unstated one is not free by default.** "Unknown" on Kaggle means the
+uploader did not choose a licence, which is not the same as permitting reuse.
+
+The often-cited **[Indian_LPR](https://github.com/sanchit2843/Indian_LPR)** —
+16,192 images, 21,683 plates, with four-point plate outlines *and* per-character
+labels — is **not downloadable**. The authors state they cannot publish Indian
+road data for legal reasons. It is the best-matched dataset in existence for
+this problem and it is worth not spending an hour rediscovering that.
+
+---
+
 ## Read this before you start
 
-This dataset is **1,683 images**. The one the shipped weights came from is
-**8,823**. Five times smaller.
+The Roboflow set is **2,573 images**. The one the shipped weights came from is
+**8,823**.
 
-That is not a reason to avoid it — it is a reason to measure. A smaller,
+Neither is a reason to prefer the other — it is a reason to measure. A smaller,
 better-matched set can beat a larger, more generic one, and this one is
-specifically Indian plates. But do not assume a switch is an upgrade: score the
+specifically Indian plates. Do not assume a switch is an upgrade: score the
 result against the current weights before replacing anything, using
 `ml/score_plates.py` and the numbers in "Decide with numbers" below.
 
-The third option is the one worth remembering: **train on both**. YOLO does not
-care where an image came from, so pointing `data.yaml` at the union of the two
-label sets is a few lines of file copying and gives 10,500 images.
+The third option is the one worth remembering: **train on both at once**, which
+is Route C. YOLO does not care where an image came from.
 
 ---
 
@@ -62,11 +115,16 @@ Measured against 45 hand-labelled plates in `ml/groundtruth_test50.csv`:
 | | |
 |---|---|
 | Detector found the plate | **44 of 45** |
-| Plate read correctly | 35 of 45 (78%) |
+| Plate read correctly | 39 of 45 (87%) |
 | Read wrongly | 2 (4%) |
-| Not read | 8 (18%) |
+| Not read | 4 (9%) |
 
-**One** of the ten failures is a detection miss. The other nine are OCR.
+**One** of the six failures is a detection miss. The other five are OCR.
+
+That 87% is up from 78% and no detector was retrained to get there. The whole
+gain came from switching off two models PaddleOCR runs by default — see
+`make_reader()` in `ml/sidecar.py`. Which is the point of this section: check
+what the reader is doing before paying for a training run.
 
 This was then confirmed the expensive way. A full retrain on all 8,023 training
 images pushed detection from mAP50 0.928 to **0.991** — and end-to-end accuracy
@@ -403,6 +461,98 @@ print('mAP50', r['metrics/mAP50(B)'], 'P', r['metrics/precision(B)'], 'R', r['me
 
 ---
 
+## Route C — merge several datasets, then fine-tune
+
+Route A trains one dataset from stock `yolov8n.pt`. Route C trains the union of
+several, starting from the detector that already works. It exists because the
+two experiments this project has already run point at it: a single dataset is
+too small, and a from-scratch retrain on a *bigger* single dataset produced a
+better-fitting detector that read fewer plates.
+
+### C1. Get the sources
+
+Fetch each one by hand into its own directory — Roboflow via the snippet in B2,
+Kaggle via the website or `kaggle datasets download -d <ref>`. Nothing here
+auto-downloads: dataset URLs rot, and a broken downloader is the worst thing to
+debug at hour 30.
+
+### C2. Merge
+
+```bash
+./.venv/bin/python ml/prepare_dataset.py \
+    --src ~/indian-plates ~/kaggle-plates datasets/plates \
+    --dst datasets/plates-merged --subset 12000 --val 1200
+```
+
+Order matters: on a duplicate image the **earliest `--src` wins**, so put the
+set whose annotations you trust most first.
+
+What it prints, and why each line is there:
+
+```
+[0] /home/deep/indian-plates: YOLO annotations, 2573 labelled images, 2594 boxes
+[1] datasets/plates: YOLO annotations, 8823 labelled images, 9155 boxes
+dropped 411 repeated image(s) of 11396 (4%) -- the same photograph in more than one source
+merged: 10985 images
+9785 train / 1200 val -> datasets/plates-merged/data.yaml
+```
+
+- **The format per source.** If one says COCO and you expected YOLO, that is the
+  moment to notice, not after training.
+- **The duplicate count.** Public plate datasets are largely re-uploads of one
+  another. A photograph in train and again in val means the model is validated
+  on an image it was trained on: val mAP rises and every number downstream is
+  quietly wrong. Deduplication runs *before* the split, by perceptual hash, so a
+  re-encoded copy under a different name is still caught. 4% here, within a
+  single source as well as across two.
+- **Images per source.** A source contributing far fewer images than it contains
+  usually means unreadable annotations, not a small dataset.
+
+`--dst` is deleted before it is written, so it may not be inside any `--src`.
+The script refuses rather than destroying the source.
+
+### C3. Fine-tune, do not restart
+
+```bash
+nohup ./.venv/bin/python ml/train_plate.py --cpu \
+      --data datasets/plates-merged/data.yaml \
+      --model runs/detect/plate/weights/best.pt \
+      --name plate-ft --epochs 12 --patience 4 --lr0 0.002 \
+      > /tmp/ft.log 2>&1 &
+```
+
+Two arguments carry the whole idea.
+
+`--model runs/detect/plate/weights/best.pt` starts from the detector that
+already reads 39 of 45 plates rather than from COCO weights that have never seen
+one.
+
+`--lr0 0.002` is what keeps it there. Ultralytics defaults to `lr0=0.01`, which
+is correct for a random head and large enough to walk a trained detector away
+from what it learned — arriving somewhere no better than a fresh run, which is
+the experiment that already cost this project two correct reads.
+
+On Kaggle, the same thing with the GPU preset:
+
+```python
+!python ml/train_plate.py --data datasets/plates-merged/data.yaml \
+        --model runs/detect/plate/weights/best.pt \
+        --name plate-ft --epochs 25 --lr0 0.002 --device 0
+```
+
+Getting the merged set onto Kaggle: run C2 locally, then upload
+`datasets/plates-merged` as a Kaggle Dataset, or run C1 and C2 inside the
+notebook — `prepare_dataset.py` is in the repo the notebook already clones.
+
+### C4. Judge it
+
+Exactly as in "Decide with numbers" below, and by `correct`, never by mAP. A
+fine-tune that improves mAP and loses a correct read is a worse model for this
+project. Re-sweep `PLATE_PAD` first: a detector that has moved has changed how
+tightly it crops, and the crop is what OCR sees.
+
+---
+
 ## Decide with numbers, not hope
 
 Both routes land weights somewhere new. **Score the new against the old on data
@@ -431,17 +581,35 @@ done
 
 Then set `PLATE_PAD` in `ml/sidecar.py` to whichever won.
 
-Measured so far, on the same 45 hand-labelled plates:
+Measured on the same 45 hand-labelled plates, every row re-measured with the
+CURRENT reader — a comparison across two different readers says nothing about
+the detectors:
 
-| weights | training images | mAP50 | correct | wrong | missed |
-|---|---|---|---|---|---|
-| `plate` (shipped) | 1,365 | 0.928 | **35 (78%)** | **2** | 8 |
-| `plate-cpu` (full retrain) | 8,023 | 0.991 | 33 (73%) | 4 | 8 |
+| weights | training images | mAP50 | pad | correct | wrong | missed | precision |
+|---|---|---|---|---|---|---|---|
+| `plate` (shipped) | 1,365 | 0.928 | 0.08 | **39 (87%)** | **2** | 4 | **95%** |
+| `plate-cpu` (full retrain) | 8,023 | 0.991 | 0.08 | 39 (87%) | 2 | 4 | 95% |
+| `plate-cpu` | 8,023 | 0.991 | 0.14 | 40 (89%) | 3 | 2 | 93% |
+| `plate-cpu` | 8,023 | 0.991 | 0.20 | 39 (87%) | 3 | 3 | 93% |
 
-The second model detects better by every box metric and reads worse. That table
-is the entire argument for this section: **mAP measures boxes, `correct`
-measures whether the system read the registration.** A model with better mAP and
-worse `correct` is a worse model for this project.
+**This table used to say something different, and the difference is the lesson.**
+Under the previous reader the shipped weights scored 35 and the full retrain 33,
+and this file concluded that a better-fitted detector reads worse because it
+crops tighter. Re-measured with the reader fixed, the two detectors are **exactly
+level**. The gap was never the detector. It was the reader mangling a crop that
+the tighter model happened to produce more often.
+
+The 0.14 row is the one worth arguing about, and it is a refusal: one more plate
+read correctly, one more read WRONGLY. A miss leaves the vehicle to Re-ID; a
+wrong read puts a real registration on the wrong vehicle. Precision when it
+answers is the column that decides, and it drops from 95% to 93%. Shipped
+weights at 0.08 stay.
+
+What survives unchanged: **mAP measures boxes, `correct` measures whether the
+system read the registration**, and they can move independently in either
+direction. Judge by `correct`, then by precision. And re-measure BOTH sides
+whenever either the detector or the reader changes — a stale comparison is worse
+than none, as this table demonstrated for two weeks.
 
 Swap only after the new weights win on `correct`:
 
@@ -458,17 +626,22 @@ automatically — no code change, no restart beyond the worker.
 
 ## Where the effort actually pays
 
-Nine of ten current failures are OCR, not detection. In rough order of value:
+Five of six current failures are OCR, not detection. In rough order of value:
 
-1. **Label more ground truth.** 45 plates is a thin test set; 200 would make
+1. **A plate-specific OCR model.** Every error left on real footage is `O` read
+   for `D` or `Q` in the series letters. The state code has a closed set of 36
+   valid answers and `_state_code()` in `ml/sidecar.py` repairs it against that
+   list; the series letters have no such set, so a guess there would corrupt
+   genuine `O` series and cannot be made safely. PaddleOCR is trained on
+   documents. A small CRNN or a TrOCR fine-tune on plate crops is the only real
+   fix, and the two synthetic Kaggle sets listed above are labelled for it.
+2. **Label more ground truth.** 45 plates is a thin test set; 200 would make
    every number in this file trustworthy, and it is an afternoon of typing.
-   `ml/groundtruth_test50.csv` shows the format.
-2. **Tune `PLATE_PAD`.** Already worth 62% → 78% once. Free, and it must be
+   `ml/groundtruth_test50.csv` shows the format, and `ml/groundtruth_kiit.csv`
+   shows the same for a video, one line per vehicle rather than per track.
+3. **Train on several datasets at once.** Route C. 10,985 unique images from the
+   two already on this machine, and more from the table above.
+4. **Tune `PLATE_PAD`.** Already worth 62% → 78% once. Free, and it must be
    redone whenever the detector changes.
-3. **A plate-specific OCR model.** PaddleOCR is trained on documents. A small
-   CRNN trained on plate crops is the real ceiling-lifter, and also the biggest
-   piece of work.
-4. **Train on both datasets at once.** 1,683 Roboflow images plus 8,823 from the
-   original set, in one `data.yaml`. More useful than either alone.
-5. Retraining the detector on one dataset. Cheap, and already shown not to move
-   end-to-end accuracy by itself.
+5. Retraining the detector on one dataset from scratch. Cheap, and twice now
+   shown not to move end-to-end accuracy by itself.

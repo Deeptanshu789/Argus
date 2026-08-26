@@ -46,6 +46,17 @@ def main() -> None:
                        ("--freeze", int)]:
         ap.add_argument(flag, type=kind, default=None)
     ap.add_argument("--device", default=None, help="'cpu', '0', '0,1'")
+    # FINE-TUNING AN ALREADY FINE-TUNED DETECTOR NEEDS THIS.
+    #
+    # Ultralytics defaults to lr0=0.01, which is right when --model is stock
+    # yolov8n.pt and the head is random. Pointed at weights that already detect
+    # plates it is large enough to walk the model away from what it learned and
+    # arrive somewhere no better than training from scratch -- which is the
+    # experiment that already cost this project two correct reads. Pass
+    # something around 0.002 when continuing from a trained detector.
+    ap.add_argument("--lr0", type=float, default=None,
+                    help="initial learning rate; lower it when --model is "
+                         "already a trained plate detector")
     args = ap.parse_args()
 
     preset = PRESETS["cpu" if args.cpu else "gpu"]
@@ -54,7 +65,10 @@ def main() -> None:
            for k, v in preset.items()}
 
     print(f"preset={'cpu' if args.cpu else 'gpu'} device={device} "
-          f"epochs={args.epochs} {cfg}", flush=True)
+          f"epochs={args.epochs} lr0={args.lr0 or 'default'} {cfg}", flush=True)
+    if args.model != "yolov8n.pt" and args.lr0 is None:
+        print("NOTE: continuing from trained weights at the default learning "
+              "rate. Consider --lr0 0.002; see the flag's help.", flush=True)
 
     from ultralytics import YOLO
 
@@ -76,6 +90,7 @@ def main() -> None:
         name=args.name,
         resume=args.resume,
         exist_ok=True,
+        **({"lr0": args.lr0} if args.lr0 is not None else {}),
         **cfg,
     )
     mins = (time.time() - t0) / 60

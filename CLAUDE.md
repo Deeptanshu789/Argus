@@ -141,18 +141,28 @@ stack immature, inference-only), 30 GB RAM.
 |---|---|
 | Detector mAP50 / precision / recall | **0.928 / 0.957 / 0.912** |
 | Plate box found | 44/45 |
-| **Read correctly** | **35/45 (78%)** |
+| **Read correctly** | **39/45 (87%)** |
 | Read wrongly | 2 (4%) |
-| Not read | 8 (18%) |
+| Not read | 4 (9%) |
 | Precision when it answers | 95% |
 
 ```bash
 python ml/score_plates.py --model runs/detect/plate/weights/best.pt --show
 ```
 
-`ml/validate_plate.py` reports *yield* over 169 photos instead — 62% — which is
-an upper bound, not accuracy: nothing there checks a read against the true
-plate, so a confident wrong answer counts as a success. Quote the 78%.
+`ml/validate_plate.py` reports *yield* over 169 photos instead, which is an
+upper bound, not accuracy: nothing there checks a read against the true plate,
+so a confident wrong answer counts as a success. Quote the 87%.
+
+**78% of that came before touching a model.** The reader was running two of
+PaddleOCR's document models on every plate crop — an orientation classifier and
+an unwarper, both meant for scanned pages. On a 40 px crop the classifier
+sometimes decides the text runs vertically and hands the recogniser a crop
+turned on its side. Switching them off took the photo set from 35 correct to 39
+and the real video from 2 exact to 4, and made OCR four times faster. See
+`make_reader()` in `ml/sidecar.py`; it is the ONLY place a reader is built, so
+that configuration cannot drift between the sidecar and the five scripts that
+measure it.
 
 ### Real footage is a different problem from the test set
 
@@ -178,14 +188,16 @@ plate rather than only the total:
    affordable.
 
 Result on the same clip: **1 of 5 to 5 of 5 found**, 2 exactly right and 3 one
-character out. Every remaining error is `O` read for `D` or `Q` in the SERIES
+character out. Fixing the reader afterwards (see above) took it to **4 of 5
+exactly right**. The one remaining error is `O` read for `D` in the SERIES
 letters, which have no closed set to check against — the plate-specific OCR
 model in `ml/TRAINING.md` is the real fix, and guessing there would corrupt
 genuine `O` series.
 
 **The detector is not the bottleneck — OCR is.** It finds a plate in 95% of
-photos; a third of those still fail to read. Three fixes took end-to-end from
-50% to 62% with no retraining at all:
+photos, and five of the six remaining failures are the read, not the box. Three
+early fixes took end-to-end yield from 50% to 62% with no retraining at all,
+and they are still the shape of every gain since:
 
 1. `correct_plate()` accepted only `AA DD A(A) DDDD`. `DL9CAU4743` is a real
    Delhi plate (district code is digit-then-letter) and `MH05DK101` has a
@@ -224,9 +236,21 @@ Retraining on all 8,023 fixed the mAP — 0.928 to **0.991** — and made the sy
 better-fitted detector crops tighter, and the last character falls outside the
 box. `PLATE_PAD` in `ml/sidecar.py` and `score_plates.py --pad` exist for this.
 
-**Judge a detector by `correct`, never by mAP.** Full procedure, both training
-routes, and the current dataset ([Quobotic Indian number plate on Roboflow][ds])
-are in `ml/TRAINING.md`.
+That conclusion was half wrong and the correction matters. Re-measured with the
+reader fixed, the two detectors score **identically** — 39 correct, 2 wrong,
+both. The gap was never the detector; it was the reader mangling a crop that the
+tighter model happened to produce more often. **Judge a detector by `correct`,
+never by mAP — and re-measure both sides whenever either the detector or the
+reader changes.** A stale comparison is worse than none.
+
+Full procedure, three training routes, a catalogue of further Indian plate
+datasets with licences, and the current dataset ([Quobotic Indian number plate on
+Roboflow][ds]) are in `ml/TRAINING.md`. `ml/prepare_dataset.py` takes several
+`--src` directories and merges them into one YOLO set, dropping repeated
+photographs by perceptual hash first — public plate datasets are largely
+re-uploads of each other, and the same image in train and val inflates val mAP
+silently. The two sets on this machine merge to **10,985 unique images** with
+411 duplicates removed.
 
 [ds]: https://universe.roboflow.com/quobotic/indian-number-plate
 
@@ -241,8 +265,35 @@ weights are a one-line swap at a single call site.
 - Re-ID embedding: **on track exit only** — the sole moment Module C needs it.
 
 4 streams x 5 FPS = 20 detections/sec. Quantized YOLOv8n at 480px on 16 Zen 5
-threads clears that. Per-frame OCR or Re-ID does not. If FPS misses, **cut
-`imgsz` before cutting features.**
+threads clears that. Per-frame OCR or Re-ID does not.
+
+**Measure before optimising — `ml/bench.py` times each stage separately**, and
+on real footage the answer was not where the prose above implies. Per processed
+frame, one stream, 848x478 traffic:
+
+| stage | before | after |
+|---|---|---|
+| decode (5 of every 30 frames) | 1.6 ms | 1.6 ms |
+| vehicle detect + BoT-SORT with Re-ID | 50 ms | 50 ms |
+| plate detect + OCR, amortised | 289 ms | 64 ms |
+| **whole loop** | **341 ms** | **121 ms** |
+
+OCR was 85% of everything. Detection was never the problem, and neither was
+decoding — which is why "cut `imgsz` before cutting features" is the wrong first
+move here: 480 to 320 saves 4 ms of a 121 ms frame and costs distant vehicles.
+Cut what the profile says.
+
+Threads are the multi-stream lever. One sidecar takes all 16 hardware threads
+for torch and ten more for Paddle; four of them each try to own the machine.
+`ARGUS_THREADS` caps both, and `worker/ingest.ts` sets it to cores/4. Four
+concurrent streams over the same clip: 102.7 s uncapped, 79.9 s capped.
+
+**Do not export the vehicle detector to OpenVINO.** It is the obvious next
+optimisation and it is wrong twice — slower (67 vs 51 ms, because BoT-SORT
+reuses the detector's own features for Re-ID and an exported IR does not expose
+them), and it changes the embedding dimension from 64 to 256, which would make
+Module C's layer 2 silently stop matching. The constant in `ml/sidecar.py`
+carries the measurement.
 
 ### 5 FPS has a floor, and it is the tracker
 
@@ -300,6 +351,9 @@ npx tsx db/repair.ts --apply    # delete them
 
 python ml/sidecar.py --selfcheck --camera X --source X   # plate-correction check
 python ml/demo_detect.py --source photo.jpg --ocr        # eyeball the detector
+python ml/bench.py --source clip.mp4                     # ms per pipeline stage
+python ml/diagnose_video.py --source clip.mp4 --truth ml/groundtruth_kiit.csv
+python ml/prepare_dataset.py --src A B C --dst datasets/plates-merged  # merge datasets
 python ml/make_demo_clips.py                # synthetic demo/cam*.mp4 test clips
 python ml/train_plate.py --epochs 50        # on Kaggle
 python ml/export_onnx.py --weights runs/detect/plate/weights/best.pt
@@ -408,8 +462,9 @@ OCR silently reads nothing forever.
 | Real `/api/*` routes | Done, contract-validated, smoke-tested |
 | `worker/ingest.ts` | Done — writes, associates, alerts, rollup, publishes |
 | `ml/sidecar.py` | Done — `run()` is the real decode/track/OCR/ReID loop |
+| `ml/bench.py`, `ml/diagnose_video.py` | Per-stage timings, per-stage plate losses |
 | `test/smoke.ts` | 38 checks incl. a live end-to-end pipeline run |
-| Trained plate weights | Done — 35/45 plates read correctly (78%) |
+| Trained plate weights | Done — 39/45 plates read correctly (87%) |
 | `src/app/(dashboard)` | Done — live, map, analytics, search, upload, devices |
 | Real traffic footage | Upload it at `/upload` — no code change needed |
 

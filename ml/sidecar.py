@@ -602,6 +602,21 @@ class _Track:
 # And the two best variants fail on DIFFERENT crops, so a retry is worth far
 # more than any single better filter. The retry only runs when the first read
 # failed to validate, so the crops that already work cost one OCR call.
+#
+# RE-MEASURED after the reader changed (see make_reader), against the 45
+# hand-labelled plates, since the numbers above describe a reader that no longer
+# exists:
+#
+#   48+CLAHE, 96 plain           39 correct, 2 wrong, 4 missed, 95% precision
+#   48 plain, 96 plain           39 correct, 2 wrong, 4 missed, 95% precision
+#   48+CLAHE only                37 correct, 2 wrong, 6 missed, 95% precision
+#   96 plain only                36 correct, 1 wrong, 8 missed, 97% precision
+#   48+CLAHE, 96 plain, 64+CLAHE 39 correct, 3 wrong, 3 missed, 93% precision
+#
+# The pair is still right. CLAHE no longer earns its place on its own, but the
+# pair costs nothing to keep. A THIRD variant is the tempting one and it is a
+# bad trade: it converts a miss into a wrong answer, which is the wrong
+# direction for a system that puts registrations on vehicles.
 _OCR_VARIANTS = ((48, True), (96, False))
 
 
@@ -744,6 +759,18 @@ def _ocr_lines(reader, image) -> list[tuple[str, float]]:
 # which then parses as a perfectly valid plate with a three-digit series and is
 # accepted with confidence. A wrong plate is worse than no plate: it attaches a
 # real registration to the wrong vehicle. Padding removed six of those eight.
+#
+# RE-SWEPT after the reader changed, same 45 plates:
+#
+#    0% pad   38/45   2 wrong, 5 missed
+#    4% pad   38/45   2 wrong, 5 missed
+#    8% pad   39/45   2 wrong, 4 missed   <- kept
+#   14% pad   39/45   2 wrong, 4 missed
+#   22% pad   37/45   4 wrong, 4 missed
+#
+# Same answer, and the plateau from 8% to 14% is wide enough that a retrained
+# detector drawing slightly tighter boxes will not fall off it. Re-sweep anyway
+# after a retrain: this is the constant that pays for a detector's tightness.
 PLATE_PAD = 0.08
 
 

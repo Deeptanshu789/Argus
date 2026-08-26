@@ -1,10 +1,29 @@
 #!/usr/bin/env python3
-"""Carve a training-sized YOLO subset out of a downloaded plate dataset.
+"""Carve a training-sized YOLO subset out of one or more downloaded plate datasets.
 
 Reads YOLO (.txt), COCO (.json) or Pascal VOC (.xml) annotations and always
 writes YOLO, because that is what Ultralytics trains on.
 
     python ml/prepare_dataset.py --src <downloaded-dataset> --subset 3000 --val 400
+
+SEVERAL SOURCES MERGE INTO ONE SET. YOLO does not care where an image came
+from, and no public Indian plate dataset is large enough on its own:
+
+    python ml/prepare_dataset.py --src ~/indian-plates ~/kaggle-plates \
+                                 --subset 8000 --val 800
+
+Merging is not concatenation, for two reasons.
+
+Basenames collide. Half these datasets export images as `0001.jpg`, and a plain
+copy silently overwrites. Every image is written under a name carrying its
+source index, so the collision cannot happen and the origin stays readable.
+
+And the SAME IMAGES appear in several datasets. Public plate sets are largely
+re-uploads of each other, often re-encoded, so the same photograph arrives with
+a different byte count and a different name. One copy in train and another in
+val is a leak: the model is validated on a picture it was trained on, val mAP
+rises, and every honest measurement downstream is quietly wrong. --dedupe (on
+by default) drops repeats by perceptual hash before anything is split.
 
 Nothing is auto-downloaded: dataset URLs and layouts rot, and a broken
 downloader at hour 0 is the worst possible time to debug one. Fetch one by hand
@@ -210,12 +229,64 @@ def find_pairs(src: Path) -> tuple[dict[Path, list[Box]], str]:
     )
 
 
-def write_split(pairs: list[tuple[Path, list[Box]]], dst: Path, split: str) -> None:
+def ahash(path: Path) -> str | None:
+    """Perceptual hash: 8x8 grey, one bit per pixel against the mean.
+
+    A byte hash only catches an untouched copy, and these datasets re-encode.
+    Average hash survives a re-encode, a resize and a small quality change,
+    which is exactly how the same photograph arrives twice. It is not a
+    similarity search and is not meant to be: two DIFFERENT cars photographed
+    the same way stay different, because the plate and the background differ in
+    more than a handful of the 64 cells.
+    """
+    import cv2
+    img = cv2.imread(str(path), cv2.IMREAD_GRAYSCALE)
+    if img is None:
+        return None
+    small = cv2.resize(img, (8, 8), interpolation=cv2.INTER_AREA)
+    mean = small.mean()
+    bits = 0
+    for v in small.flatten():
+        bits = (bits << 1) | int(v > mean)
+    return f"{bits:016x}"
+
+
+def dedupe(pairs: list[tuple[Path, list[Box]]]) -> tuple[list[tuple[Path, list[Box]]], int]:
+    """Drop repeated photographs, keeping the first occurrence of each.
+
+    First means "from the earliest --src", so the dataset listed first wins its
+    own annotations for any image the later ones also carry. That is the useful
+    order: put the set you trust first.
+    """
+    # ponytail: exact hash equality, so a re-encode harsh enough to flip one of
+    # the 64 bits survives as a second copy. Matching within a Hamming distance
+    # would catch those, and costs a pairwise comparison -- 10,000 images is 50
+    # million of them. Worth doing only if a merge is measured to be letting
+    # duplicates through; the report line below is what would show it.
+    seen: set[str] = set()
+    kept: list[tuple[Path, list[Box]]] = []
+    dropped = 0
+    for img, boxes in pairs:
+        h = ahash(img)
+        if h is None:              # unreadable: keep it, let training complain
+            kept.append((img, boxes))
+            continue
+        if h in seen:
+            dropped += 1
+            continue
+        seen.add(h)
+        kept.append((img, boxes))
+    return kept, dropped
+
+
+def write_split(pairs: list[tuple[Path, list[Box]]], dst: Path, split: str,
+                name_of: dict[Path, str] | None = None) -> None:
     for sub in ("images", "labels"):
         (dst / sub / split).mkdir(parents=True, exist_ok=True)
     for img, boxes in pairs:
-        shutil.copy2(img, dst / "images" / split / img.name)
-        (dst / "labels" / split / f"{img.stem}.txt").write_text(
+        stem = (name_of or {}).get(img, img.stem)
+        shutil.copy2(img, dst / "images" / split / f"{stem}{img.suffix}")
+        (dst / "labels" / split / f"{stem}.txt").write_text(
             "".join(f"0 {cx:.6f} {cy:.6f} {w:.6f} {h:.6f}\n" for cx, cy, w, h in boxes)
         )
 
@@ -223,17 +294,55 @@ def write_split(pairs: list[tuple[Path, list[Box]]], dst: Path, split: str) -> N
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--src", type=Path, required=True, help="downloaded dataset root")
+    ap.add_argument("--src", type=Path, required=True, nargs="+",
+                    help="one or more downloaded dataset roots, merged in the "
+                         "order given; on a duplicate image the earlier one wins")
     ap.add_argument("--dst", type=Path, default=Path("datasets/plates"))
     ap.add_argument("--subset", type=int, default=3000, help="train images")
     ap.add_argument("--val", type=int, default=400)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--no-dedupe", dest="dedupe", action="store_false",
+                    help="keep repeated photographs. Only for measuring what "
+                         "deduplication removed -- a repeat spanning train and "
+                         "val inflates val mAP and hides it")
     args = ap.parse_args()
 
-    found, fmt = find_pairs(args.src)
-    pairs = sorted(found.items())
-    print(f"{fmt} annotations: {len(pairs)} labelled images, "
-          f"{sum(len(b) for b in found.values())} boxes")
+    # --dst is deleted and rewritten, and the default is a path that is itself a
+    # perfectly good --src once a previous run has produced it. Deleting the
+    # source mid-merge would take the images with it and leave a half-written
+    # dataset that still looks valid.
+    dst = args.dst.resolve()
+    for src in args.src:
+        src = src.resolve()
+        if dst == src or dst in src.parents or src in dst.parents:
+            raise SystemExit(
+                f"--dst {dst} overlaps --src {src}.\n"
+                f"--dst is deleted before it is written, which would destroy the "
+                f"source. Point --dst somewhere else.")
+
+    pairs: list[tuple[Path, list[Box]]] = []
+    name_of: dict[Path, str] = {}
+    for i, src in enumerate(args.src):
+        found, fmt = find_pairs(src)
+        one = sorted(found.items())
+        for img, boxes in one:
+            # Prefixed because half these datasets export images as 0001.jpg and
+            # a plain copy into one folder overwrites silently.
+            name_of[img] = f"s{i}_{img.stem}"
+            pairs.append((img, boxes))
+        print(f"[{i}] {src}: {fmt} annotations, {len(one)} labelled images, "
+              f"{sum(len(b) for b in found.values())} boxes")
+
+    if args.dedupe:
+        before = len(pairs)
+        pairs, dropped = dedupe(pairs)
+        if dropped:
+            print(f"dropped {dropped} repeated image(s) of {before} "
+                  f"({dropped / before:.0%}) -- the same photograph in more than "
+                  f"one source")
+
+    if len(args.src) > 1:
+        print(f"merged: {len(pairs)} images")
 
     random.Random(args.seed).shuffle(pairs)
     val = pairs[: args.val]
@@ -245,8 +354,8 @@ def main() -> None:
 
     if args.dst.exists():
         shutil.rmtree(args.dst)
-    write_split(train, args.dst, "train")
-    write_split(val, args.dst, "val")
+    write_split(train, args.dst, "train", name_of)
+    write_split(val, args.dst, "val", name_of)
 
     yaml = args.dst / "data.yaml"
     yaml.write_text(
@@ -373,6 +482,70 @@ def _selfcheck() -> None:
         assert len(list((out / "images" / "train").iterdir())) == 10
         assert len(list((out / "labels" / "train").iterdir())) == 10
         assert (out / "labels" / "train" / f"{train[0][0].stem}.txt").read_text().startswith("0 ")
+
+        # ---- merging two sources ----
+        import cv2
+        import numpy as np
+
+        def photo(path: Path, seed: int, size=64) -> None:
+            """Something with structure, like a photograph.
+
+            NOT random noise: JPEG discards high frequencies, so a re-encode of
+            pure noise genuinely is a different image at 8x8 and the fixture
+            would be testing the codec rather than the hash. A gradient with a
+            block in it is what a car against a road looks like to an 8x8
+            average.
+            """
+            g = np.linspace(0, 255, size, dtype=np.uint8)
+            img = np.repeat(g[None, :], size, axis=0)
+            img = np.dstack([img, img, img])
+            off = seed * 7 % (size // 2)
+            img[off:off + size // 3, off:off + size // 2] = 20
+            cv2.imwrite(str(path), img)
+
+        # Same basename in both sources, DIFFERENT pictures. Both must survive,
+        # and neither may overwrite the other.
+        a = root / "srcA"; (a / "images").mkdir(parents=True); (a / "labels").mkdir()
+        b = root / "srcB"; (b / "images").mkdir(parents=True); (b / "labels").mkdir()
+        for folder, seed in ((a, 1), (b, 2)):
+            photo(folder / "images" / "0001.jpg", seed)
+            (folder / "labels" / "0001.txt").write_text("0 0.5 0.5 0.2 0.1\n")
+
+        merged = [(x, y) for f in (a, b) for x, y in sorted(find_pairs(f)[0].items())]
+        names = {img: f"s{i}_{img.stem}" for i, f in enumerate((a, b))
+                 for img in find_pairs(f)[0]}
+        kept, dropped = dedupe(merged)
+        assert dropped == 0, "two different photographs must not be called duplicates"
+
+        merged_out = root / "merged"
+        write_split(kept, merged_out, "train", names)
+        assert len(list((merged_out / "images" / "train").iterdir())) == 2, \
+            "same basename from two sources must not overwrite"
+
+        # The same photograph, re-encoded at a different quality and copied
+        # under a different name -- which is how these datasets actually
+        # overlap. It must be recognised as one image, not two.
+        c = root / "srcC"; (c / "images").mkdir(parents=True); (c / "labels").mkdir()
+        img = cv2.imread(str(a / "images" / "0001.jpg"))
+        cv2.imwrite(str(c / "images" / "copy.jpg"), img, [cv2.IMWRITE_JPEG_QUALITY, 55])
+        (c / "labels" / "copy.txt").write_text("0 0.5 0.5 0.2 0.1\n")
+
+        dup = merged + sorted(find_pairs(c)[0].items())
+        kept, dropped = dedupe(dup)
+        assert dropped == 1, f"a re-encoded copy must be caught, dropped {dropped}"
+        assert len(kept) == 2
+        assert kept[0][0].parent.parent.name == "srcA", \
+            "the earlier --src must be the copy that is kept"
+
+        # --dst inside --src would delete the source before reading it.
+        import subprocess
+        import sys as _sys
+        r = subprocess.run(
+            [_sys.executable, __file__, "--src", str(a), "--dst", str(a / "out")],
+            capture_output=True, text=True)
+        assert r.returncode != 0 and "overlaps --src" in (r.stdout + r.stderr), \
+            "writing --dst inside --src must be refused, not silently destroy it"
+        assert (a / "images" / "0001.jpg").exists(), "the source survived"
 
     print("selfcheck ok")
 
