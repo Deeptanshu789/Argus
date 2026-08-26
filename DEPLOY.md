@@ -286,12 +286,26 @@ log but harmless; it recovers on its own when the phone comes back.
 **Plates are rarely read.** Check step 2. `argus logs worker | grep "plate
 detector"` — if it says no trained weights were found, the mount is empty.
 
-**The disk fills.** Uploaded video is never deleted automatically. List the
-volume and remove what you no longer need:
+**The disk fills.** Uploaded video is the only thing here that grows without
+bound. Prune it:
 
 ```bash
-argus exec app du -sh /app/uploads
-argus exec app sh -c 'ls -lt /app/uploads | head'
+argus exec app npx tsx scripts/prune-uploads.ts --days 7           # report
+argus exec app npx tsx scripts/prune-uploads.ts --days 7 --apply   # delete
+```
+
+It removes the source video of finished uploads older than `--days`, plus any
+file with no upload row at all. It KEEPS the plates, tracks, detections and
+journeys — those are rows, they are small, and they are what the system is for.
+The results page keeps working; only the original footage goes.
+
+An upload still `pending` or `running` is never touched, however old, because
+the worker may be reading it.
+
+Weekly, on the host:
+
+```bash
+(crontab -l 2>/dev/null; echo "0 4 * * 0 cd $PWD && docker compose -f docker-compose.prod.yml --env-file .env.production exec -T app npx tsx scripts/prune-uploads.ts --days 7 --apply") | crontab -
 ```
 
 **Every connection fails and `curl` reports `tlsv1 alert internal error`.**

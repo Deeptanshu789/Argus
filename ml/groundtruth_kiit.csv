@@ -1,0 +1,15 @@
+# Plates a human can read in WhatsApp_Video_2026-08-26_at_19.38.48.mp4,
+# transcribed by eye from the best crop of each vehicle.
+#
+# ONE LINE PER VEHICLE, not per track: the tracker fragments a single vehicle
+# into several tracks, and scoring per track would count the same car three
+# times and reward fragmentation.
+#
+# Vehicles whose plate is NOT legible to a human are deliberately absent. The
+# system cannot be expected to read what the footage does not contain, and
+# counting them would measure the camera, not the pipeline.
+JH05DG5443
+OD33AU6001
+OD02DR5938
+OD05BQ2430
+OD02DJ9428

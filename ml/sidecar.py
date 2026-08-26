@@ -58,6 +58,92 @@ STATE_CODES = {
     "TN","TR","TS","UK","UP","WB",
 }
 
+# What a character in the STATE SLOT might really be, cheapest reading first.
+#
+# The two-letter state code is the one part of a plate with a CLOSED set of
+# valid answers, and that is worth exploiting: rather than guess each character
+# independently and check the result, every plausible pair is scored and the
+# best real state code wins.
+#
+# Measured need. On 848x478 footage a plate is around 40 px wide and PaddleOCR
+# returns OD33AU6001 as "0033AU6001" — both O and D read as 0. ALPHA_FOR maps
+# 0 to O and nothing else, so the pair became "OO", failed the STATE_CODES
+# check, and twenty-six agreeing reads of one vehicle were all thrown away.
+# One frame where the plate was large enough to resolve the D survived, which
+# is why the video produced exactly one plate out of forty vehicles.
+#
+# Cost 1 is a substitution that looks identical at low resolution; cost 2 is
+# one that needs the glyph to be genuinely degraded. Identity is free, so a
+# clean read never loses to a repaired one.
+STATE_ALTS: dict[str, tuple[tuple[str, int], ...]] = {
+    # D and 0 are the same glyph at this size, so both cost 1. That is what
+    # makes "00" resolve to OD at all.
+    "0": (("O", 1), ("D", 1), ("Q", 2), ("U", 2)),
+    "1": (("I", 1), ("L", 1), ("T", 2)),
+    "2": (("Z", 1),),
+    "3": (("B", 2), ("E", 2)),
+    "4": (("A", 1),),
+    "5": (("S", 1),),
+    "6": (("G", 1), ("C", 2)),
+    "7": (("T", 2), ("Z", 2)),
+    "8": (("B", 1), ("R", 2)),
+    "9": (("G", 2), ("P", 2), ("Q", 2)),
+}
+# DIGITS ONLY, and that is the whole principle. A state code contains no
+# digits, so a digit in this slot is PROVABLY a misread and replacing it is a
+# repair. A letter here might simply be correct, and substituting one letter
+# for another is a guess dressed up as a repair.
+#
+# Measured: allowing letter-for-letter turned "MB06J9177" into MP06J9177 — a
+# real Bengal plate reported as a Madhya Pradesh one, from a photo the stricter
+# rule declines to read at all. A wrong plate attaches a registration to the
+# wrong vehicle; a missing one only fails to help.
+
+# A repaired state code cannot cost more than this. Two cheap substitutions, or
+# one expensive one. Beyond that the read is a guess dressed up as a plate, and
+# a wrong plate attaches a real registration to the wrong vehicle.
+STATE_MAX_COST = 2
+
+# Codes belonging to territories with very small vehicle fleets, penalised by
+# one so they never win a TIE against a populous state.
+#
+# Without this, "00" repairs to OD (Odisha, ~10 million vehicles) and DD (Daman
+# and Diu, a district of about 250,000 people) at exactly the same cost, and
+# which one wins depends on dictionary iteration order. A prior this lopsided is
+# not a guess, it is the only defensible way to break the tie.
+RARE_STATES = {"DD", "DN", "LD", "LA", "PY", "CH", "SK", "MZ", "NL", "AR", "ML", "TR"}
+
+
+def _state_code(pair: str) -> tuple[str, int] | None:
+    """Best real state code for two characters, or None.
+
+    Returns (code, cost). Cost is 0 for a clean read, and is folded into the
+    caller's correction penalty so a repaired plate reports lower confidence
+    than one that needed no help.
+    """
+    if len(pair) != 2:
+        return None
+    if pair in STATE_CODES:
+        return pair, 0
+
+    best: tuple[str, int] | None = None
+    for a, ca in ((pair[0], 0), *STATE_ALTS.get(pair[0], ())):
+        if not a.isalpha():
+            continue
+        for b, cb in ((pair[1], 0), *STATE_ALTS.get(pair[1], ())):
+            if not b.isalpha():
+                continue
+            cost = ca + cb
+            if cost > STATE_MAX_COST:
+                continue
+            code = a + b
+            if code not in STATE_CODES:
+                continue
+            ranked = cost + (1 if code in RARE_STATES else 0)
+            if best is None or ranked < best[1]:
+                best = (code, ranked)
+    return best
+
 
 # THE PROTOCOL CHANNEL. Captured before anything else can touch it, then
 # sys.stdout is pointed at stderr for the rest of the process.
@@ -160,8 +246,8 @@ def correct_plate(raw: str) -> tuple[str | None, float]:
     if not 9 <= len(s) <= 11:
         return None, 0.0
 
-    state = _fix(s[:2], want_digit=False)
-    if state is None or state[0] not in STATE_CODES:
+    state = _state_code(s[:2])
+    if state is None:
         return None, 0.0
 
     best: tuple[str, int] | None = None
@@ -276,9 +362,45 @@ MISS_LIMIT = 10
 
 # OCR budget. Reading every frame would blow the inference budget on its own;
 # these two rules keep a track to a handful of reads regardless of its length.
-PLATE_FIRST_FRAMES = 3                 # early frames, before it drives out of view
-PLATE_MAX_ATTEMPTS = 6                 # hard ceiling per track
-PLATE_GROWTH = 1.4                     # ...plus one retry when the crop gets this
+PLATE_FIRST_FRAMES = 2                 # early frames, before it drives out of view
+PLATE_MAX_ATTEMPTS = 10                # hard ceiling per track
+PLATE_GROWTH = 1.25                    # ...plus a retry each time the crop grows this
+
+# Vehicles narrower than this never get an OCR attempt at all.
+#
+# MEASURED on 848x478 traffic footage: across 209 vehicle crops, not one plate
+# was ever read from a vehicle under 124 px wide, and 62% of all crops were
+# narrower than that. Those attempts cost a plate detection and two OCR passes
+# each to learn nothing — and worse, they burned the per-track attempt ceiling
+# before the vehicle got close enough to be legible. Forty vehicles yielded one
+# plate.
+#
+# Set below the measured floor rather than at it, because that floor came from
+# one clip. In ABSOLUTE pixels, not a fraction of the frame: legibility is a
+# property of how many pixels fall on the plate, so a 4K camera reading the same
+# car at the same distance genuinely does have more to work with.
+#
+# ponytail: a single width threshold. A vehicle-type-aware one would help — a
+# motorcycle plate is legible at a narrower crop than a truck's — if plate
+# reading on two-wheelers ever becomes the limit.
+PLATE_MIN_VEHICLE_PX = 110
+
+# How many reads must AGREE before a track stops trying.
+#
+# Two was too few. OCR errors on a moving vehicle are mostly independent, which
+# is what makes voting work — but some are not: at 40 px, D and O are the same
+# glyph, and PaddleOCR reads OD02DR5938 as OD02OR5938 on frame after frame. Two
+# such reads agree and stop the track before it ever gets close enough to
+# resolve the D, even though a later frame would have read it correctly.
+#
+# THREE WAS TRIED AND MEASURED NOTHING. The hope was that a later, closer frame
+# would resolve the D once the pair of wrong reads no longer stopped the track.
+# It did not: on this footage PaddleOCR reads that D as an O in every frame, so
+# a third opinion is the same opinion. Same 2 of 5 exact, 6 seconds slower.
+#
+# Left at two, with the experiment recorded, because the next person to look at
+# a one-character error will have the same idea.
+PLATE_AGREE_STOP = 2
                                        #    much bigger, i.e. the vehicle came closer
 
 
@@ -329,7 +451,7 @@ class _Track:
     an OCR attempt, which crop is the best one, and what gets emitted on exit."""
 
     __slots__ = ("track_id", "vehicle_type", "entry_time", "last_seen_frame",
-                 "frames", "attempts", "best_area", "votes",
+                 "frames", "attempts", "best_area", "last_ocr_area", "votes",
                  "embedding", "colour", "colour_hist")
 
     def __init__(self, track_id: str, vehicle_type: str, ts: str, frame_no: int):
@@ -340,6 +462,10 @@ class _Track:
         self.frames = 0
         self.attempts = 0
         self.best_area = 0.0
+        # Crop size at the most recent OCR attempt. wants_ocr() retries once the
+        # vehicle has grown meaningfully SINCE THEN, which spends the budget as
+        # it approaches rather than all at once when it is furthest away.
+        self.last_ocr_area = 0.0
         # Every accepted read for this track, not just the best one. A vehicle
         # gets several OCR attempts as it crosses the frame; those reads fail
         # INDEPENDENTLY -- a smudge that turns 8 into B on one frame is gone on
@@ -367,14 +493,38 @@ class _Track:
                    key=lambda kv: (len(kv[1]), sum(kv[1]) / len(kv[1])))
         return best[0], round(sum(best[1]) / len(best[1]), 3)
 
-    def wants_ocr(self, area: float) -> bool:
+    def wants_ocr(self, area: float, width: int) -> bool:
+        """Should this frame get an OCR attempt?
+
+        The growth clause is what makes this work on real footage. A vehicle
+        enters the frame far away and unreadable and grows as it approaches, so
+        the FIRST frames of a track are the worst ones — spending every attempt
+        there is spending them all on plates too small to read.
+
+        It compares against the size at the LAST ATTEMPT, not against the
+        largest crop seen. An earlier version used `best_area`, which run()
+        updates before calling this, so the test read `area > area * 1.4` and
+        was never true: the growth retry never fired once, and every track was
+        read only in its first three frames. On a real 848x478 clip that turned
+        forty vehicles into one plate.
+        """
+        # Too far away to carry a legible plate. Checked FIRST, before the
+        # frame count, because a track's opening frames are the ones where the
+        # vehicle is furthest away — spending the budget there is what made
+        # real footage read almost nothing.
+        if width < PLATE_MIN_VEHICLE_PX:
+            return False
         # Stop once two attempts have AGREED. One confident read is not enough
         # to stop on: the confident wrong reads are exactly the dangerous ones.
-        if any(len(v) >= 2 for v in self.votes.values()):
+        if any(len(v) >= PLATE_AGREE_STOP for v in self.votes.values()):
             return False
         if self.attempts >= PLATE_MAX_ATTEMPTS:
             return False
-        return self.frames <= PLATE_FIRST_FRAMES or area > self.best_area * PLATE_GROWTH
+        # "First frames" now means the first frames at which it is BIG ENOUGH,
+        # which for an approaching vehicle is where it becomes readable.
+        if self.attempts < PLATE_FIRST_FRAMES:
+            return True
+        return area > self.last_ocr_area * PLATE_GROWTH
 
 
 # Preprocessing variants, tried in order until one produces a plate that
@@ -658,8 +808,9 @@ def run(camera: str, source: str, fps: int, loop: bool = False) -> None:
                     t.best_area = area
                     t.colour = _colour_name(crop)
                     t.colour_hist = _colour_hist(crop)
-                if t.wants_ocr(area):
+                if t.wants_ocr(area, x2 - x1):
                     t.attempts += 1
+                    t.last_ocr_area = area
                     plate, plate_conf = _read_plate(reader, plate_model, crop)
                     if plate:
                         t.record(plate, plate_conf)
@@ -755,14 +906,49 @@ def _selfcheck() -> None:
 
     # The OCR budget is what keeps the CPU inference budget. If wants_ocr ever
     # returns True unconditionally, the sidecar silently stops meeting 5 FPS.
+    big = PLATE_MIN_VEHICLE_PX + 10
     t = _Track("1", "car", now_iso(), 0)
     t.frames = 1
-    assert t.wants_ocr(100.0), "the first frames of a track must get an attempt"
-    t.frames, t.best_area = 50, 100.0
-    assert not t.wants_ocr(101.0), "a mid-track frame with no growth must not"
-    assert t.wants_ocr(200.0), "a crop that doubled means the vehicle came closer"
+    assert t.wants_ocr(100.0, big), "the first readable frames must get an attempt"
+    # A vehicle too far away to carry a legible plate is skipped BEFORE any of
+    # the budget is spent. 62% of crops on real footage are in this state.
+    assert not t.wants_ocr(100.0, PLATE_MIN_VEHICLE_PX - 1), \
+        "a vehicle too small to read must not consume an attempt"
+    t.frames, t.attempts, t.last_ocr_area = 50, PLATE_FIRST_FRAMES, 100.0
+    assert not t.wants_ocr(101.0, big), "a mid-track frame with no growth must not"
+
+    # AND IT MUST FIRE WHEN THE VEHICLE APPROACHES. The clause was dead for a
+    # release -- it compared against best_area, which run() updates before
+    # calling this, so the test was `area > area * 1.4` and never true. Every
+    # track was then read only in its first three frames, which on real footage
+    # are the frames where the vehicle is furthest away and least readable.
+    assert t.wants_ocr(100.0 * PLATE_GROWTH + 1, big), \
+        "a vehicle that has grown since the last attempt must get another"
     t.attempts = PLATE_MAX_ATTEMPTS
-    assert not t.wants_ocr(10_000.0), "the per-track attempt ceiling must hold"
+    assert not t.wants_ocr(10_000.0, big), "the attempt ceiling must hold"
+
+    # Two agreeing reads end it, however large the vehicle gets.
+    t2 = _Track("2", "car", now_iso(), 0)
+    t2.frames, t2.attempts = 50, 1
+    for i in range(PLATE_AGREE_STOP - 1):
+        t2.record("OD33AU6001", 0.9)
+        assert t2.wants_ocr(10_000.0, big), \
+            f"{i + 1} agreeing read(s) must not stop a track short of PLATE_AGREE_STOP"
+    t2.record("OD33AU6001", 0.9)
+    assert not t2.wants_ocr(10_000.0, big), "PLATE_AGREE_STOP agreeing reads must stop it"
+
+    # THE STATE SLOT. A plate 40 px wide reads OD as 00, and rejecting that
+    # threw away twenty-six agreeing reads of one vehicle on real footage.
+    assert _state_code("OD") == ("OD", 0), "a clean code must cost nothing"
+    assert _state_code("00")[0] == "OD", "00 is OD, not OO"
+    assert _state_code("0D")[0] == "OD"
+    assert _state_code("O0")[0] == "OD"
+    assert _state_code("05") is None, "no state code is reachable, so none is invented"
+    assert correct_plate("0033AU6001")[0] == "OD33AU6001"
+    # A repaired plate must report LOWER confidence than a clean one.
+    assert correct_plate("0033AU6001")[1] > correct_plate("OD33AU6001")[1]
+    t.attempts = PLATE_MAX_ATTEMPTS
+    assert not t.wants_ocr(10_000.0, big), "the per-track attempt ceiling must hold"
 
     # Voting. Two agreeing reads beat one more-confident read, because OCR
     # errors on a moving vehicle are independent and the truth repeats.
@@ -773,13 +959,15 @@ def _selfcheck() -> None:
     plate, conf = v.plate()
     assert plate == "KA01MB1234", f"majority must win, got {plate}"
     assert abs(conf - 0.81) < 1e-6, conf
-    assert not v.wants_ocr(10_000.0), "two agreeing reads must stop further attempts"
+    v.record("KA01MB1234", 0.79)
+    assert not v.wants_ocr(10_000.0, big), \
+        "enough agreeing reads must stop further attempts"
 
     single = _Track("3", "car", now_iso(), 0)
-    single.frames, single.best_area = 50, 100.0
+    single.frames, single.last_ocr_area = 50, 100.0
     single.record("KA01MB1234", 0.99)
     assert single.plate()[0] == "KA01MB1234"
-    assert single.wants_ocr(10_000.0), \
+    assert single.wants_ocr(10_000.0, big), \
         "ONE confident read must NOT stop attempts -- confident wrong reads are " \
         "exactly the dangerous ones, and a second look is what catches them"
     assert _Track("4", "car", now_iso(), 0).plate() == (None, None)

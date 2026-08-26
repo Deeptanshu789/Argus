@@ -573,6 +573,33 @@ export async function setUploadSourceStatus(
              WHERE camera_id = ${cameraId}`;
 }
 
+/**
+ * Uploads older than `days`, oldest first, with their files.
+ *
+ * Video is the only thing here that grows without bound: a few minutes of
+ * 1080p is hundreds of megabytes, nothing deletes it, and a VPS disk fills
+ * silently. The DETECTIONS are what the system is for — they are rows, they
+ * are small, and they stay. It is the source video that has served its purpose
+ * once it has been decoded.
+ */
+export async function uploadsOlderThan(
+  days: number, limit = 100,
+): Promise<{ id: string; label: string | null; created_at: Date;
+             files: string[]; cameras: string[] }[]> {
+  return sql<{ id: string; label: string | null; created_at: Date;
+               files: string[]; cameras: string[] }[]>`
+    SELECT u.id, u.label, u.created_at,
+           coalesce(array_agg(s.path) FILTER (WHERE s.path IS NOT NULL), '{}') AS files,
+           coalesce(array_agg(s.camera_id) FILTER (WHERE s.camera_id IS NOT NULL), '{}') AS cameras
+      FROM uploads u
+      LEFT JOIN upload_sources s ON s.upload_id = u.id
+     WHERE u.created_at < now() - make_interval(days => ${days})
+       AND u.status IN ('done', 'error')
+     GROUP BY u.id
+     ORDER BY u.created_at
+     LIMIT ${limit}`;
+}
+
 /** Uploads interrupted by a worker restart. Left running, they never finish. */
 export async function requeueStaleUploads(): Promise<number> {
   const rows = await sql`

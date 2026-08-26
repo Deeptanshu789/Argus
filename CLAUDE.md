@@ -154,6 +154,35 @@ python ml/score_plates.py --model runs/detect/plate/weights/best.pt --show
 an upper bound, not accuracy: nothing there checks a read against the true
 plate, so a confident wrong answer counts as a success. Quote the 78%.
 
+### Real footage is a different problem from the test set
+
+Measured on a 848x478 phone clip of live traffic, against plates transcribed by
+eye (`ml/groundtruth_kiit.csv`): it read **1 of 5** legible plates. Three causes,
+all found with `ml/diagnose_video.py`, which reports where each stage loses a
+plate rather than only the total:
+
+1. `correct_plate()` could not repair the STATE code. At 40 px, `OD` reads as
+   `00`, and `ALPHA_FOR` maps `0` to `O` and nothing else, so `OO` failed the
+   state check and twenty-six agreeing reads of one vehicle were thrown away.
+   The state code is the one part of a plate with a **closed set** of valid
+   answers, so `_state_code()` now scores every plausible pair against
+   `STATE_CODES` and takes the cheapest real one.
+2. The OCR growth retry was **dead code**. `run()` updated `best_area` before
+   calling `wants_ocr(area)`, so the test read `area > area * 1.4` and never
+   fired. Every track was read only in its first three frames — which for an
+   approaching vehicle are the frames where it is furthest away. It now compares
+   against the size at the last attempt.
+3. **62% of OCR attempts were spent on vehicles too small to read.** No plate
+   was ever read from a vehicle under 124 px wide. `PLATE_MIN_VEHICLE_PX` skips
+   those before any cost is paid, which is what makes a larger attempt budget
+   affordable.
+
+Result on the same clip: **1 of 5 to 5 of 5 found**, 2 exactly right and 3 one
+character out. Every remaining error is `O` read for `D` or `Q` in the SERIES
+letters, which have no closed set to check against — the plate-specific OCR
+model in `ml/TRAINING.md` is the real fix, and guessing there would corrupt
+genuine `O` series.
+
 **The detector is not the bottleneck — OCR is.** It finds a plate in 95% of
 photos; a third of those still fail to read. Three fixes took end-to-end from
 50% to 62% with no retraining at all:
@@ -265,6 +294,7 @@ npm run smoke        # every endpoint over real HTTP, judged by the zod contract
 ARGUS_PYTHON=python3 ARGUS_CAMERAS='CAM1=demo,CAM3=demo' npm run worker
 
 ./scripts/dev-https.sh          # self-signed cert, so a PHONE can use its camera
+npx tsx scripts/prune-uploads.ts --days 7 [--apply]   # delete old source video
 npx tsx db/repair.ts            # report trajectories that break the contract
 npx tsx db/repair.ts --apply    # delete them
 
