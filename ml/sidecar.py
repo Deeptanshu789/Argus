@@ -844,6 +844,10 @@ def run(camera: str, source: str, fps: int, loop: bool = False) -> None:
     from ultralytics import YOLO
 
     apply_thread_limit()
+    # Reported from inside the child, not from the supervisor that set it: the
+    # supervisor can only say what it intended, and an env var that never
+    # arrived looks identical from there.
+    print(f"threads: {_THREADS or 'library default (all cores)'}", file=sys.stderr)
     vehicle_model = YOLO(VEHICLE_WEIGHTS)
     weights = find_plate_weights()
     plate_model = YOLO(weights) if weights else None
