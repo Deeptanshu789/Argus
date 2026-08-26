@@ -43,6 +43,24 @@ import sys
 import time
 from datetime import datetime, timezone
 
+# THREADS. Set before any of torch, OpenVINO, oneDNN or OpenCV is imported,
+# because each reads its thread count once at import and ignores later changes.
+#
+# One sidecar left alone takes all 16 hardware threads for the vehicle detector
+# AND all 16 for PaddleOCR, and the two then fight over the same cores. That is
+# invisible on one stream and expensive on four: the city demo runs one process
+# per camera, so the default of "everything" means four processes each trying to
+# own the whole machine.
+#
+# worker/ingest.ts sets ARGUS_THREADS to the machine's thread count divided by
+# the number of cameras it is about to spawn. Run by hand with nothing set, the
+# sidecar keeps the library defaults, which is right for measuring one stream.
+_THREADS = os.environ.get("ARGUS_THREADS")
+if _THREADS and _THREADS.isdigit() and int(_THREADS) > 0:
+    for _var in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS",
+                 "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS"):
+        os.environ.setdefault(_var, _THREADS)
+
 # Re-exported so the TS side and this file agree on the label set.
 VEHICLE_CLASSES = {2: "car", 3: "motorcycle", 5: "bus", 7: "truck"}
 
@@ -346,12 +364,48 @@ def demo(camera: str, fps: int) -> None:
 
 # ---------------------------------------------------------------- real run --
 
-VEHICLE_WEIGHTS = "yolov8n.pt"        # stock COCO: car, motorcycle, bus, truck
+# Stock COCO: car, motorcycle, bus, truck.
+#
+# DO NOT EXPORT THIS ONE TO OPENVINO. It is the obvious optimisation and it is
+# wrong twice. Measured on the same 20 processed frames of real footage:
+#
+#   yolov8n.pt              50.9 ms/frame,  embedding dimension  64
+#   yolov8n_openvino_model  67.3 ms/frame,  embedding dimension 256
+#
+# Slower, because ml/botsort.yaml sets `model: auto` and the tracker reuses the
+# DETECTOR's own features for Re-ID. A .pt model hands those over from a forward
+# pass it already ran; an exported IR does not expose them, so ultralytics runs
+# a second network to get them. The export saves time on detection and spends
+# more than it saved on appearance.
+#
+# And the dimension changes, which is the dangerous half. Module C compares
+# embeddings across cameras by cosine similarity; vectors of different length
+# score zero, so a fleet where one camera used the export and the others did not
+# would show layer 2 quietly never firing rather than any error. worker/ingest.ts
+# checks for exactly this and refuses to start, which is why the trap is
+# survivable -- but it should not be walked into.
+#
+# The plate detector is a different case and IS exported: nothing tracks with
+# it, so only its detection speed matters.
+VEHICLE_WEIGHTS = "yolov8n.pt"
 PLATE_CANDIDATES = (
     "runs/detect/plate/weights/best_openvino_model",
     "runs/detect/plate/weights/best.pt",
 )
-IMGSZ = 480                            # see CLAUDE.md: cut this before cutting features
+# Two sizes, not one, because the two detectors are constrained differently.
+#
+# The vehicle detector runs on the whole frame every processed frame and is the
+# second-largest cost in the loop, so its size is the cheapest thing to trade.
+# The plate detector runs on a vehicle crop only when a track wants a read, and
+# it is an OpenVINO export -- an exported IR is compiled at ONE input size, and
+# handing it another makes ultralytics letterbox back to the exported size,
+# paying for the resize and gaining nothing. PLATE_IMGSZ must match whatever
+# ml/export_onnx.py was run with.
+#
+# IMGSZ is kept as an alias because four scripts import it.
+VEHICLE_IMGSZ = 480                    # see CLAUDE.md: cut this before cutting features
+PLATE_IMGSZ = 480                      # must equal the export imgsz
+IMGSZ = VEHICLE_IMGSZ
 VEHICLE_CONF = 0.35
 PLATE_CONF = 0.25
 
@@ -404,15 +458,22 @@ PLATE_AGREE_STOP = 2
                                        #    much bigger, i.e. the vehicle came closer
 
 
+def _first_present(candidates) -> str | None:
+    from pathlib import Path
+    for c in candidates:
+        if Path(c).exists():
+            return c
+    return None
+
+
 def find_plate_weights() -> str | None:
     """Trained plate detector, if one has been exported. Returns None when it
     has not: the sidecar must still run end to end on stock weights, or nothing
     downstream can be developed before the Kaggle run finishes."""
-    from pathlib import Path
-    for c in PLATE_CANDIDATES:
-        if Path(c).exists():
-            return c
-    return None
+    return _first_present(PLATE_CANDIDATES)
+
+
+
 
 
 def _colour_hist(crop) -> list[float]:
@@ -544,6 +605,100 @@ class _Track:
 _OCR_VARIANTS = ((48, True), (96, False))
 
 
+# Every OCR call is built here, and nowhere else. Four scripts used to
+# construct PaddleOCR with their own copy of these arguments, which meant a
+# measurement taken with one script did not necessarily describe what the
+# sidecar ran.
+#
+# enable_mkldnn=False is NOT tuning. Paddle's oneDNN executor raises
+# ConvertPirAttribute2RuntimeAttribute on this CPU build for every predict()
+# call, and the constructor gives no hint that it will. Omit the flag and OCR
+# silently reads nothing forever.
+#
+# The two doc_* models are the tuning. PaddleOCR 3.x runs a document
+# orientation classifier and a document unwarping network before every read
+# unless told not to. Both exist for photographed pages; a plate crop is
+# neither rotated by 90 degrees nor curled at the corners. Measured on this
+# machine, per predict() call on the same image: 2348 ms with them, 1794 ms
+# without, identical text out.
+#
+# Turning the doc models off is not only cheaper, it READS BETTER. Measured
+# against the 45 hand-labelled plates in ml/groundtruth_test50.csv, changing
+# nothing else:
+#
+#   with doc orientation + unwarping    35 correct, 2 wrong, 8 missed, 95% precision
+#   without                             39 correct, 2 wrong, 4 missed, 95% precision
+#
+# Four plates that were missed are now read, and no new wrong answer appeared.
+# The orientation classifier is trained on pages, and on a 40 px plate crop it
+# sometimes decides the text runs vertically and hands the recogniser a crop
+# rotated by 90 degrees. There is nothing to recover from that.
+#
+# Capping the text detector's input size (text_det_limit_side_len) was tried
+# and measured nothing: 170.8 ms per attempt uncapped, 163.4 ms at 320, 175.0 ms
+# at 640, which is noise. _prepare_crop already hands it a crop 48 px tall, far
+# under any limit meant for a scanned page. Not a knob worth having.
+#
+# ARGUS_OCR_VERSION selects the recogniser family, so a slower-but-better or
+# faster-but-worse model can be measured against the same file without editing
+# code. Measured, same conditions:
+#
+#   PP-OCRv6 (default)   39 correct, 2 wrong,  4 missed,  95% precision, 9.4% CER
+#   PP-OCRv5             37 correct, 5 wrong,  3 missed,  88% precision, 8.2% CER
+#   PP-OCRv4             29 correct, 7 wrong,  9 missed,  81% precision, 21.7% CER
+#
+# v5 reads more characters right and more PLATES wrong, which is the trade this
+# project refuses: a wrong plate puts a real registration on the wrong vehicle.
+# Judge by correct and by precision, never by character error rate.
+OCR_VERSION = os.environ.get("ARGUS_OCR_VERSION") or "PP-OCRv6"
+
+
+def apply_thread_limit() -> None:
+    """Tell OpenCV and torch about ARGUS_THREADS. Call after importing them.
+
+    The environment variables set at the top of this file only reach the BLAS
+    libraries. OpenCV keeps its own pool for resize and colour conversion, and
+    ultralytics resets torch's pool after import, so both have to be told again
+    once they exist.
+    """
+    if not (_THREADS and _THREADS.isdigit()):
+        return
+    n = int(_THREADS)
+    try:
+        import cv2
+        cv2.setNumThreads(n)
+    except Exception:
+        pass
+    try:
+        import torch
+        torch.set_num_threads(n)
+    except Exception:
+        pass
+
+
+def make_reader():
+    """The PaddleOCR instance the whole project uses. None if it will not load."""
+    try:
+        from paddleocr import PaddleOCR
+        kw = {}
+        # Paddle defaults to 10 threads and torch to all 16, on a machine with
+        # 16. Together they oversubscribe before a second camera even starts.
+        if _THREADS and _THREADS.isdigit():
+            kw["cpu_threads"] = int(_THREADS)
+        return PaddleOCR(
+            lang="en",
+            ocr_version=OCR_VERSION,
+            use_textline_orientation=False,
+            use_doc_orientation_classify=False,
+            use_doc_unwarping=False,
+            enable_mkldnn=False,
+            **kw,
+        )
+    except Exception as exc:
+        print(f"OCR unavailable ({type(exc).__name__}: {exc})", file=sys.stderr)
+        return None
+
+
 def _prepare_crop(crop, height: int, equalise: bool):
     import cv2
     out = crop
@@ -610,7 +765,7 @@ def _read_plate(reader, plate_model, crop) -> tuple[str | None, float | None]:
 
     region = crop
     if plate_model is not None:
-        res = plate_model(crop, imgsz=IMGSZ, conf=PLATE_CONF, verbose=False)[0]
+        res = plate_model(crop, imgsz=PLATE_IMGSZ, conf=PLATE_CONF, verbose=False)[0]
         if not len(res.boxes):
             return None, None
         box = max(res.boxes, key=lambda b: float(b.conf[0]))
@@ -661,6 +816,7 @@ def run(camera: str, source: str, fps: int, loop: bool = False) -> None:
     import cv2
     from ultralytics import YOLO
 
+    apply_thread_limit()
     vehicle_model = YOLO(VEHICLE_WEIGHTS)
     weights = find_plate_weights()
     plate_model = YOLO(weights) if weights else None
@@ -671,15 +827,9 @@ def run(camera: str, source: str, fps: int, loop: bool = False) -> None:
     else:
         print(f"plate detector: {weights}", file=sys.stderr)
 
-    reader = None
-    try:
-        from paddleocr import PaddleOCR
-        # enable_mkldnn=False is NOT tuning. Paddle's oneDNN executor raises
-        # ConvertPirAttribute2RuntimeAttribute on this CPU build for every
-        # predict() call, and the constructor gives no hint that it will.
-        reader = PaddleOCR(lang="en", use_textline_orientation=False, enable_mkldnn=False)
-    except Exception as exc:
-        print(f"OCR unavailable ({type(exc).__name__}); tracking only", file=sys.stderr)
+    reader = make_reader()
+    if reader is None:
+        print("tracking only; no plate will be read", file=sys.stderr)
 
     cap = cv2.VideoCapture(source)
     if not cap.isOpened():
@@ -757,7 +907,7 @@ def run(camera: str, source: str, fps: int, loop: bool = False) -> None:
 
         result = vehicle_model.track(
             frame, persist=True, tracker="ml/botsort.yaml",
-            classes=list(VEHICLE_CLASSES), imgsz=IMGSZ, conf=VEHICLE_CONF,
+            classes=list(VEHICLE_CLASSES), imgsz=VEHICLE_IMGSZ, conf=VEHICLE_CONF,
             verbose=False)[0]
 
         # Harvest appearance vectors while the tracker still holds them. On exit

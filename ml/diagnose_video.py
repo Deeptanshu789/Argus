@@ -54,7 +54,7 @@ def main() -> None:
     args = ap.parse_args()
 
     if args.imgsz is not None:
-        S.IMGSZ = args.imgsz
+        S.VEHICLE_IMGSZ = args.imgsz
     if args.plate_conf is not None:
         S.PLATE_CONF = args.plate_conf
     if args.pad is not None:
@@ -67,10 +67,9 @@ def main() -> None:
     weights = args.model or S.find_plate_weights()
     plate_model = YOLO(weights) if weights else None
     print(f"plate detector : {weights}")
-    print(f"imgsz {S.IMGSZ}  plate_conf {S.PLATE_CONF}  pad {S.PLATE_PAD}\n")
+    print(f"imgsz {S.VEHICLE_IMGSZ}  plate_conf {S.PLATE_CONF}  pad {S.PLATE_PAD}\n")
 
-    from paddleocr import PaddleOCR
-    reader = PaddleOCR(lang="en", use_textline_orientation=False, enable_mkldnn=False)
+    reader = S.make_reader()
 
     cap = cv2.VideoCapture(args.source)
     if not cap.isOpened():
@@ -101,7 +100,7 @@ def main() -> None:
         frames += 1
 
         res = vehicle_model.track(frame, persist=True, tracker="ml/botsort.yaml",
-                                  classes=list(S.VEHICLE_CLASSES), imgsz=S.IMGSZ,
+                                  classes=list(S.VEHICLE_CLASSES), imgsz=S.VEHICLE_IMGSZ,
                                   conf=S.VEHICLE_CONF, verbose=False)[0]
         boxes = res.boxes
         if boxes is None or not len(boxes):
@@ -120,7 +119,7 @@ def main() -> None:
 
             if plate_model is None:
                 continue
-            pres = plate_model(crop, imgsz=S.IMGSZ, conf=S.PLATE_CONF, verbose=False)[0]
+            pres = plate_model(crop, imgsz=S.PLATE_IMGSZ, conf=S.PLATE_CONF, verbose=False)[0]
             if not len(pres.boxes):
                 continue
             with_plate_box += 1

@@ -13,6 +13,7 @@
  *   npm run worker
  */
 import { spawn, type ChildProcess } from "node:child_process";
+import { cpus } from "node:os";
 import { createInterface } from "node:readline";
 import { SidecarEvent, type CameraLink, type VehicleType } from "@/contract";
 import { associateArrival, toHop, type TrackRecord } from "@/server/association";
@@ -32,6 +33,28 @@ const CAMERAS = (process.env.ARGUS_CAMERAS ?? "CAM1=demo/cam1.mp4,CAM2=demo/cam2
     const [id, source] = s.split("=");
     return { id: id!.trim(), source: source!.trim() };
   });
+
+/**
+ * Threads each sidecar may use.
+ *
+ * Left alone, one sidecar takes every hardware thread for the vehicle detector
+ * and ten more for PaddleOCR, on a machine that has sixteen in total. That is
+ * free money on a single stream and a real loss on several: four sidecars each
+ * asking for the whole machine spend their time descheduling each other.
+ *
+ * MEASURED, four concurrent streams over the same clip, 40 processed frames
+ * each: 102.7 s of wall clock uncapped, 79.9 s at four threads apiece. Same
+ * work, same results, 22% less time.
+ *
+ * Divided by four rather than by the number of cameras because devices and
+ * uploads spawn their own sidecars at runtime, so the fleet size is not known
+ * here — four is the number the CPU budget in CLAUDE.md is written around.
+ *
+ * ponytail: a static split. If a box ever runs many more cameras than cores,
+ * hand this a real count instead of a constant.
+ */
+const SIDECAR_THREADS = process.env.ARGUS_THREADS
+  ?? String(Math.max(2, Math.floor(cpus().length / 4)));
 
 /** ponytail: fixed 2s backoff. Exponential backoff if a flaky RTSP source shows up. */
 const RESTART_MS = 2000;
@@ -121,7 +144,10 @@ function start(
   const args = ["ml/sidecar.py", "--camera", cam.id, "--source", cam.source, "--fps", "5"];
   if (!isStream && !once) args.push("--loop");
 
-  const proc = spawn(PYTHON, args, { stdio: ["ignore", "pipe", "pipe"] });
+  const proc = spawn(PYTHON, args, {
+    stdio: ["ignore", "pipe", "pipe"],
+    env: { ...process.env, ARGUS_THREADS: SIDECAR_THREADS },
+  });
 
   createInterface({ input: proc.stdout! }).on("line", (line) => {
     if (!line.trim()) return;
@@ -572,6 +598,8 @@ async function boot() {
     );
   }
   console.log(`topology: ${calibration.size} cameras, ${links.length} links`);
+  console.log(`sidecars get ${SIDECAR_THREADS} of ${cpus().length} threads each ` +
+              `(ARGUS_THREADS to change)`);
 
   // An upload left "running" by a killed worker would never be picked up again.
   const requeued = await db.requeueStaleUploads();

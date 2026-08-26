@@ -20,7 +20,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from sidecar import correct_plate
+from sidecar import correct_plate, make_reader
 
 IMG_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 VID_EXT = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
@@ -90,18 +90,9 @@ def main() -> None:
                 args.imgsz = got
     print(f"model : {model_path}  (imgsz {args.imgsz})")
 
-    reader = None
-    if args.ocr:
-        try:
-            from paddleocr import PaddleOCR
-            # enable_mkldnn=False is NOT a performance knob here. Paddle's
-            # oneDNN executor throws ConvertPirAttribute2RuntimeAttribute on
-            # this CPU build, on every predict() call. Without this the reader
-            # constructs fine and then reads nothing, forever.
-            reader = PaddleOCR(lang="en", use_textline_orientation=False,
-                               enable_mkldnn=False)
-        except Exception as exc:            # PaddleOCR's API moves between majors
-            print(f"warning: OCR unavailable ({type(exc).__name__}), boxes only")
+    reader = make_reader() if args.ocr else None
+    if args.ocr and reader is None:
+        print("warning: OCR unavailable, boxes only")
 
     if src.is_dir():
         items = sorted(p for p in src.rglob("*") if p.suffix.lower() in IMG_EXT)[: args.limit]

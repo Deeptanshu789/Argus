@@ -30,7 +30,9 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from sidecar import IMGSZ, correct_plate, find_plate_weights  # noqa: E402
+from sidecar import (  # noqa: E402
+    PLATE_IMGSZ, correct_plate, find_plate_weights, make_reader,
+)
 
 IMG_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
@@ -63,7 +65,7 @@ def main() -> None:
         print(f"dataset : {yaml_path}  split={args.split}\n")
         try:
             m = model.val(data=str(yaml_path), split=args.split,
-                          imgsz=IMGSZ, conf=0.001, verbose=False).box
+                          imgsz=PLATE_IMGSZ, conf=0.001, verbose=False).box
             print(f"  mAP50      {m.map50:.3f}")
             print(f"  mAP50-95   {m.map:.3f}")
             print(f"  precision  {m.mp:.3f}")
@@ -88,13 +90,9 @@ def main() -> None:
         sys.exit(f"no images under {folder}")
 
     import cv2
-    try:
-        from paddleocr import PaddleOCR
-        # See CLAUDE.md: paddle's oneDNN executor throws on every predict() on
-        # this CPU build, and the constructor gives no warning that it will.
-        reader = PaddleOCR(lang="en", use_textline_orientation=False, enable_mkldnn=False)
-    except Exception as exc:
-        sys.exit(f"OCR unavailable: {type(exc).__name__}: {exc}")
+    reader = make_reader()
+    if reader is None:
+        sys.exit("OCR unavailable")
 
     from sidecar import _read_plate
 
@@ -107,7 +105,7 @@ def main() -> None:
         img = cv2.imread(str(p))
         if img is None:
             continue
-        res = model(img, imgsz=IMGSZ, conf=args.conf, verbose=False)[0]
+        res = model(img, imgsz=PLATE_IMGSZ, conf=args.conf, verbose=False)[0]
         if not len(res.boxes):
             continue
         found += 1

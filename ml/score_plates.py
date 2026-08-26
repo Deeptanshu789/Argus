@@ -24,7 +24,9 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from sidecar import IMGSZ, _pad, _read_plate, find_plate_weights  # noqa: E402
+from sidecar import (  # noqa: E402
+    PLATE_IMGSZ, _pad, _read_plate, find_plate_weights, make_reader,
+)
 
 
 def char_errors(a: str, b: str) -> int:
@@ -69,9 +71,8 @@ def main() -> None:
 
     import cv2
     from ultralytics import YOLO
-    from paddleocr import PaddleOCR
     model = YOLO(weights)
-    reader = PaddleOCR(lang="en", use_textline_orientation=False, enable_mkldnn=False)
+    reader = make_reader()
 
     folder = args.data / args.split / "images"
     correct = wrong = missed = 0
@@ -87,7 +88,7 @@ def main() -> None:
             print(f"  missing image: {name}")
             continue
 
-        det = model(img, imgsz=IMGSZ, conf=args.conf, verbose=False)[0]
+        det = model(img, imgsz=PLATE_IMGSZ, conf=args.conf, verbose=False)[0]
         got = None
         if len(det.boxes):
             box = max(det.boxes, key=lambda b: float(b.conf[0]))
