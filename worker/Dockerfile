@@ -11,9 +11,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# THE CPU TORCH INDEX IS NOT OPTIONAL. PyPI's default wheel bundles ~2.5 GB of
-# CUDA runtime that a VPS without an NVIDIA card cannot use; the CPU wheel is
-# ~200 MB and is what the sidecar actually runs.
+# THE PIP UPGRADE IS LOAD-BEARING, not housekeeping. Debian bookworm ships pip
+# 23.0.1, which rejects the typing_extensions wheel over a name-normalisation
+# bug ("expected 'typing-extensions', but metadata has 'typing_extensions'"),
+# falls back to the source distribution, and then cannot fetch flit_core to
+# build it because --index-url has restricted it to the torch index. The build
+# fails several minutes in, with an error naming neither pip nor Debian.
+RUN python3 -m pip install --break-system-packages --no-cache-dir --upgrade pip
+
+# THE CPU TORCH INDEX IS NOT OPTIONAL EITHER. PyPI's default wheel bundles
+# ~2.5 GB of CUDA runtime that a VPS without an NVIDIA card cannot use; the CPU
+# wheel is ~200 MB and is what the sidecar actually runs.
 RUN python3 -m pip install --break-system-packages --no-cache-dir \
         --index-url https://download.pytorch.org/whl/cpu torch torchvision
 

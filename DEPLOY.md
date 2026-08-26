@@ -114,7 +114,15 @@ docker compose -f docker-compose.prod.yml --env-file .env.production config >/de
 | you have | `ARGUS_SITE` | `ARGUS_TLS` | phone camera |
 |---|---|---|---|
 | a domain pointing here | `argus.example.com` | `you@example.com` | works, no warning |
-| an IP address only | `:443` | `internal` | works after accepting a warning once |
+| an IP address only | `203.0.113.10` | `internal` | works after accepting a warning once |
+
+`ARGUS_SITE` must be a **hostname or an IP**, never a bare `:443`. A site
+address with no name gives Caddy nothing to put in a certificate, and every
+connection then dies in the TLS handshake with `tlsv1 alert internal error` —
+an error that mentions neither the certificate nor the line that caused it.
+The script fills this in with the address it detects; correct it by hand if the
+box is behind NAT and its interface address is not what the outside world
+reaches.
 
 Let's Encrypt will not issue a certificate for a bare IP, so the second row is
 not a shortcut — it is the only option until a domain points here. HTTPS is
@@ -143,7 +151,9 @@ docker compose -f docker-compose.prod.yml --env-file .env.production up -d --bui
 ```
 
 The first build downloads PyTorch, OpenVINO and PaddleOCR. Ten to twenty
-minutes on a small box is normal.
+minutes on a small box is normal, and the worker image is the slow half. The
+finished images are roughly 2 GB for the app and several GB for the worker, so
+this is where the 20 GB disk minimum goes.
 
 **Check:**
 
@@ -174,6 +184,9 @@ seeded 4 cameras, 6 links
 
 Every statement in `db/schema.sql` is idempotent, so this is always safe to
 re-run, and it is how a schema change is applied later.
+
+The worker re-reads the camera graph every fifteen seconds, so it picks this up
+on its own — there is no requirement to seed before starting it.
 
 ## 7. Verify it actually works
 
@@ -280,6 +293,17 @@ volume and remove what you no longer need:
 argus exec app du -sh /app/uploads
 argus exec app sh -c 'ls -lt /app/uploads | head'
 ```
+
+**Every connection fails and `curl` reports `tlsv1 alert internal error`.**
+`ARGUS_SITE` is a bare `:443` or empty, so Caddy has no name to issue a
+certificate for. Set it to the hostname or IP you reach the box at, then
+`argus up -d caddy`.
+
+**The build fails installing torch**, with `No matching distribution found for
+flit_core`. Debian's pip is too old and rejects a wheel it should accept, then
+cannot fetch the build dependency to compile the fallback. `worker/Dockerfile`
+upgrades pip before installing torch for exactly this reason — if you have
+edited that file, put the upgrade back.
 
 **Everything is slow and the dashboard lags.** Inference is starving the web
 tier. Lower `WORKER_CPUS`, or cut `imgsz` before cutting features — see

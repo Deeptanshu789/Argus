@@ -317,6 +317,15 @@ async function finishTrack(cameraId: string, trackId: string, plate: string | nu
  */
 async function rollup() {
   try {
+    // Re-read the topology every tick. The worker starts before `npm run
+    // db:setup` seeds the cameras on a fresh deployment, and a graph read once
+    // at boot stays empty forever — layer 3 then abstains on every pair and
+    // matching silently degrades to plate plus Re-ID with nothing to explain
+    // it. Two small queries every fifteen seconds is a cheap way to have no
+    // ordering requirement at all.
+    links = await db.getLinks({ includeUploads: true });
+    calibration = await db.getCalibration();
+
     const perCamera: Record<string, { vehicle_count: number; congestion_score: number }> = {};
     let cityCount = 0;
     const citySpeeds: number[] = [];

@@ -10,13 +10,18 @@
 #   with a domain     ARGUS_SITE=argus.example.com   ARGUS_TLS=you@example.com
 #                     a real Let's Encrypt certificate, no warning anywhere
 #
-#   IP address only   ARGUS_SITE=:443                ARGUS_TLS=internal
+#   IP address only   ARGUS_SITE=203.0.113.10        ARGUS_TLS=internal
 #                     Caddy's own CA; every browser warns once, then works
 #
 # Let's Encrypt will not issue for a bare IP, so the second is not a shortcut —
 # it is the only option until a domain points here.
+#
+# ARGUS_SITE MUST BE A HOSTNAME OR AN IP, never a bare `:443`. A site address
+# with no name gives Caddy nothing to put in a certificate, and every TLS
+# handshake then fails with `tlsv1 alert internal error` — which names neither
+# the certificate nor the config line that caused it.
 
-{$ARGUS_SITE::443} {
+{$ARGUS_SITE:localhost} {
 	tls {$ARGUS_TLS:internal}
 	encode gzip
 

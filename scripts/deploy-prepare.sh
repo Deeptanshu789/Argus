@@ -64,7 +64,12 @@ fill POSTGRES_PASSWORD "$(openssl rand -base64 24 | tr -d '/+=' | head -c 32)"
 if [ -z "$(grep -E '^ARGUS_PASSWORD_HASH=' "$ENV_FILE" | cut -d= -f2-)" ]; then
   OPERATOR_PASSWORD=$(openssl rand -base64 18 | tr -d '/+=' | head -c 20)
   HASH=$(docker run --rm caddy caddy hash-password --plaintext "$OPERATOR_PASSWORD")
-  fill ARGUS_PASSWORD_HASH "$HASH"
+  # A bcrypt hash is full of dollar signs ($2a$14$...) and docker compose
+  # interpolates the value it reads from an env file. Unescaped, everything
+  # after the third $ is read as a variable name, substituted with nothing, and
+  # the hash silently arrives at Caddy corrupted -- basic auth then rejects the
+  # correct password with no clue why. Doubling each $ makes compose emit one.
+  fill ARGUS_PASSWORD_HASH "${HASH//\$/\$\$}"
   echo
   echo "  ┌──────────────────────────────────────────────────────┐"
   printf  "  │ operator password: %-33s │\n" "$OPERATOR_PASSWORD"
@@ -80,7 +85,15 @@ if [ -n "$DOMAIN" ]; then
   sed -i "s|^ARGUS_TLS=.*|ARGUS_TLS=${EMAIL}|" "$ENV_FILE"
   echo "ARGUS_SITE=$DOMAIN with a Let's Encrypt certificate"
 else
-  echo "no domain given: Caddy will sign its own certificate and browsers will warn once"
+  # Caddy needs a NAME to issue a certificate for. A bare `:443` fails every
+  # TLS handshake with an error that mentions neither certificates nor config.
+  ip_addr=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' | head -1)
+  [ -n "$ip_addr" ] || ip_addr=localhost
+  sed -i "s|^ARGUS_SITE=.*|ARGUS_SITE=${ip_addr}|" "$ENV_FILE"
+  sed -i "s|^ARGUS_TLS=.*|ARGUS_TLS=internal|" "$ENV_FILE"
+  echo "no domain given: ARGUS_SITE=$ip_addr with a self-signed certificate"
+  echo "  Browsers will warn once. Behind NAT this is the INTERNAL address —"
+  echo "  set ARGUS_SITE in $ENV_FILE to whatever the outside world reaches."
 fi
 
 # ---------------------------------------------------------------------------
