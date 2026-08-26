@@ -244,9 +244,26 @@ If this does not run, **stop adding features and fix it.**
 
 ## Stage 4 — Swap in the trained model
 
-Change one path in the sidecar's config, restart the worker. Measure `mAP50` on
-val and end-to-end FPS at 4 streams. **If FPS misses, cut `imgsz` before cutting
-features.**
+Change one path in the sidecar's config, restart the worker. Then measure the
+two things that actually decide, in this order:
+
+```bash
+./.venv/bin/python ml/score_plates.py --model runs/detect/plate-new/weights/best.pt
+./.venv/bin/python ml/bench.py --source <a real clip>
+```
+
+`score_plates.py` reports plates read **correctly**, which is the number that
+says whether the swap was an improvement. mAP50 is not: measured here, a
+detector with mAP 0.991 and one with 0.928 read exactly the same 39 of 45
+plates. Re-sweep `PLATE_PAD` before judging any new detector — it crops
+differently, and the crop is what OCR sees.
+
+`bench.py` reports milliseconds per stage rather than one total, because "too
+slow" is a different fix at each one. On real footage OCR was 85% of the loop
+and detection was never the problem — so **cut what the profile says, not
+`imgsz` by reflex**: 480 to 320 saves 4 ms of a 121 ms frame and loses distant
+vehicles. For several cameras, `ARGUS_THREADS` is the lever; the worker already
+sets it.
 
 ---
 
