@@ -48,6 +48,11 @@ export const Track = z.object({
   color: z.string().nullable(),
   entry_time: Iso,
   exit_time: Iso.nullable(),
+  /**
+   * null when the track is too short to measure, or when the camera has no
+   * metres-per-pixel survey. A blank is honest; a guessed number is not.
+   */
+  speed_kmh: z.number().nullable(),
 });
 
 export const Hop = z.object({
@@ -110,6 +115,85 @@ export const Alert = z.object({
   plate_text: z.string().nullable(),
   detail: z.string(),
   acked: z.boolean(),
+});
+
+// -------------------------------------------------------------- uploads --
+// A video uploaded from the operator's machine. Each file becomes its own
+// camera, so tracks, trajectories and analytics need no special case for
+// uploaded footage — only the results page needs to know which cameras belong
+// to which upload.
+
+export const UploadStatus = z.enum(["pending", "running", "done", "error"]);
+
+export const UploadSource = z.object({
+  camera_id: z.string(),
+  filename: z.string(),
+  status: UploadStatus,
+  error: z.string().nullable(),
+  /** Vehicles tracked in this file so far. */
+  tracks: z.number().int(),
+  /** Of those, how many produced a plate that passed validation. */
+  plates: z.number().int(),
+});
+
+export const Upload = z.object({
+  id: z.string(),
+  created_at: Iso,
+  label: z.string().nullable(),
+  status: UploadStatus,
+  /** null when the operator did not say how far apart the cameras are. */
+  gap_seconds: z.number().int().nullable(),
+  error: z.string().nullable(),
+  sources: z.array(UploadSource),
+});
+
+/** One vehicle read out of an uploaded video. */
+export const UploadPlate = z.object({
+  camera_id: z.string(),
+  track_id: z.string(),
+  plate_text: z.string().nullable(),
+  plate_conf: z.number().nullable(),
+  vehicle_type: VehicleType,
+  entry_time: Iso,
+  speed_kmh: z.number().nullable(),
+});
+
+export const UploadResult = z.object({
+  upload: Upload,
+  plates: z.array(UploadPlate),
+  /** Cross-video journeys, present only when more than one file was uploaded. */
+  trajectories: z.array(Trajectory),
+});
+
+// -------------------------------------------------------------- devices --
+// A phone or laptop paired as a camera. Unlike an upload this is a real live
+// camera and stays in the city views; only how its frames arrive is unusual.
+
+export const DeviceKind = z.enum(["browser", "url"]);
+
+export const DeviceStatus = z.enum([
+  "waiting",   // code issued, nothing has connected yet
+  "live",      // frames arriving
+  "stale",     // paired once, nothing recently
+  "revoked",
+]);
+
+export const Device = z.object({
+  id: z.string(),
+  /** What the operator types on the phone. Short, unambiguous, case-folded. */
+  code: z.string(),
+  camera_id: z.string(),
+  label: z.string().nullable(),
+  /** null until something actually connects. */
+  kind: DeviceKind.nullable(),
+  /** For kind="url": the stream the sidecar reads. Never null for that kind. */
+  source_url: z.string().nullable(),
+  status: DeviceStatus,
+  created_at: Iso,
+  paired_at: Iso.nullable(),
+  last_frame_at: Iso.nullable(),
+  /** Where to point a phone. Built from the request host, not a config file. */
+  pair_url: z.string(),
 });
 
 // ------------------------------------------------------------ websocket --
@@ -214,5 +298,13 @@ export type SearchResult = z.infer<typeof SearchResult>;
 export type AnalyticsBucket = z.infer<typeof AnalyticsBucket>;
 export type AnalyticsResponse = z.infer<typeof AnalyticsResponse>;
 export type Alert = z.infer<typeof Alert>;
+export type UploadStatus = z.infer<typeof UploadStatus>;
+export type UploadSource = z.infer<typeof UploadSource>;
+export type Upload = z.infer<typeof Upload>;
+export type UploadPlate = z.infer<typeof UploadPlate>;
+export type UploadResult = z.infer<typeof UploadResult>;
+export type DeviceKind = z.infer<typeof DeviceKind>;
+export type DeviceStatus = z.infer<typeof DeviceStatus>;
+export type Device = z.infer<typeof Device>;
 export type ServerMessage = z.infer<typeof ServerMessage>;
 export type SidecarEvent = z.infer<typeof SidecarEvent>;

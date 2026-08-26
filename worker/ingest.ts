@@ -18,6 +18,7 @@ import { SidecarEvent, type CameraLink, type VehicleType } from "@/contract";
 import { associateArrival, toHop, type TrackRecord } from "@/server/association";
 import {
   bucketize, congestionScore, detectStationary, detectVolumeSpike, detectWrongWay,
+  estimateSpeed,
   type CameraCalibration, type DetectionRow,
 } from "@/server/analytics";
 import * as db from "@/server/db";
@@ -102,14 +103,23 @@ async function flush() {
 
 // --------------------------------------------------------------- sidecars --
 
-function start(cam: { id: string; source: string }): ChildProcess {
+/**
+ * `once` marks a sidecar that must run its source through exactly one time and
+ * then stop: an uploaded file is a finite recording, not a camera. A looping or
+ * restarting sidecar would re-read the same vehicles forever, and the upload
+ * would never report itself finished.
+ */
+function start(
+  cam: { id: string; source: string },
+  once?: { onExit: (code: number | null) => void },
+): ChildProcess {
   // A video FILE that ends is not a camera that failed. Loop it in the sidecar
   // rather than letting it exit and restart: a restart reloads YOLO, the plate
   // detector and PaddleOCR, which is ~20 s of dead air in the middle of a demo.
   // A live stream never ends, so the flag costs it nothing.
   const isStream = cam.source === "demo" || /^(rtsp|rtmp|https?):\/\//.test(cam.source);
   const args = ["ml/sidecar.py", "--camera", cam.id, "--source", cam.source, "--fps", "5"];
-  if (!isStream) args.push("--loop");
+  if (!isStream && !once) args.push("--loop");
 
   const proc = spawn(PYTHON, args, { stdio: ["ignore", "pipe", "pipe"] });
 
@@ -137,6 +147,8 @@ function start(cam: { id: string; source: string }): ChildProcess {
   createInterface({ input: proc.stderr! }).on("line", (l) => console.error(`[${cam.id}] ${l}`));
 
   proc.on("exit", (code) => {
+    children.delete(cam.id);
+    if (once) { once.onExit(code); return; }
     if (shuttingDown) return;
     console.error(`[${cam.id}] sidecar exited (${code}), restarting in ${RESTART_MS}ms`);
     setTimeout(() => children.set(cam.id, start(cam)), RESTART_MS);
@@ -149,6 +161,13 @@ async function handle(ev: SidecarEvent) {
   switch (ev.event) {
     case "ready":
       console.log(`[${ev.camera_id}] ready at ${ev.fps} fps`);
+      // A device sidecar reaching "ready" has OPENED its source. For a URL
+      // device that is the only signal we get — nothing else ever tells us the
+      // phone's app is still serving — so it is what marks the device live.
+      if (deviceCams.has(ev.camera_id)) {
+        deviceFailures.delete(ev.camera_id);
+        void db.touchDevice(ev.camera_id).catch(() => {});
+      }
       return;
 
     case "error":
@@ -248,19 +267,32 @@ async function handle(ev: SidecarEvent) {
         }
       }
 
-      await anomalies(ev.camera_id, ev.track_id, ev.plate_text);
+      await finishTrack(ev.camera_id, ev.track_id, ev.plate_text);
       return;
     }
   }
 }
 
-// --------------------------------------------------------------- anomalies --
+// ------------------------------------------------- speed and anomalies --
 
-async function anomalies(cameraId: string, trackId: string, plate: string | null) {
+/**
+ * Everything that needs the track's whole detection history, done once.
+ *
+ * Speed lives here rather than in the sidecar because it needs the camera's
+ * metres-per-pixel, which is a property of the installation, not of the video.
+ * The sidecar would have to be told, and then told again whenever a camera is
+ * re-surveyed.
+ */
+async function finishTrack(cameraId: string, trackId: string, plate: string | null) {
   const cal = calibration.get(cameraId);
   if (!cal) return;
   const rows = await db.trackDetections(cameraId, trackId);
   if (rows.length < 2) return;
+
+  // null when the track is too short or its frames share one timestamp — the
+  // column stays null rather than reporting a fabricated number.
+  const kmh = estimateSpeed(rows, cal);
+  if (kmh !== null) await db.setTrackSpeed(cameraId, trackId, kmh);
 
   const input = { camera_id: cameraId, track_id: trackId, plate_text: plate, rows };
   for (const found of [detectStationary(input, cal), detectWrongWay(input, cal)]) {
@@ -335,6 +367,179 @@ async function rollup() {
 /** Don't re-alert the same spike every 15 seconds. */
 const lastSpike = new Map<string, string>();
 
+// ---------------------------------------------------------------- uploads --
+
+/** How often the worker looks for a video the operator has uploaded. */
+const UPLOAD_POLL_MS = 3000;
+
+let uploadRunning = false;
+
+/**
+ * Run one uploaded upload's videos through the pipeline.
+ *
+ * Every file becomes its own camera, so nothing downstream needs to know an
+ * upload happened: detections, tracks, Module C and the analytics rollup all
+ * run exactly as they do for a live camera. The only difference is that these
+ * sidecars stop when their file ends.
+ *
+ * All of an upload's files start together, because Module C matches a vehicle
+ * leaving one camera against vehicles arriving at another, and that comparison
+ * only makes sense if both recordings are being read over the same period.
+ */
+async function runUpload(upload: Awaited<ReturnType<typeof db.claimPendingUpload>>) {
+  if (!upload) return;
+  console.log(`[upload ${upload.id}] ${upload.sources.length} file(s)` +
+              (upload.gap_seconds === null
+                ? " — no camera gap given, layer 3 will abstain"
+                : ` — ${upload.gap_seconds}s between cameras`));
+
+  // New cameras and, when a gap was given, new links. Module C reads both from
+  // memory, so without this refresh an upload's own topology is invisible to it.
+  links = await db.getLinks({ includeUploads: true });
+  calibration = await db.getCalibration();
+
+  const failures: string[] = [];
+  const sources = await db.uploadSourcePaths(upload.id);
+
+  // Started together, and NOT shifted in time. Two cameras at a junction record
+  // over the same period, so decoding their files together already reproduces
+  // the real interval between sightings: a vehicle a minute apart in the footage
+  // is a minute apart in the timestamps. `gap_seconds` says what travel time to
+  // EXPECT, and is spent on the camera links; it is not a playback offset.
+  //
+  // The assumption this rests on: the uploaded files cover the same period. Two
+  // clips trimmed from different start times would need shifting, and nothing
+  // here does that.
+  await Promise.all(sources.map((src) => new Promise<void>((resolve) => {
+    void db.setUploadSourceStatus(src.camera_id, "running").catch(() => {});
+    console.log(`[upload ${upload.id}] ${src.camera_id} <- ${src.filename}`);
+    const proc = start({ id: src.camera_id, source: src.path }, {
+      onExit: (code) => {
+        const okExit = code === 0;
+        if (!okExit) failures.push(`${src.filename} (exit ${code})`);
+        void db.setUploadSourceStatus(
+          src.camera_id, okExit ? "done" : "error",
+          okExit ? null : `sidecar exited with ${code}`,
+        ).catch(() => {});
+        resolve();
+      },
+    });
+    children.set(src.camera_id, proc);
+  })));
+
+  // The last detections are still in the batch buffer; an upload that reports
+  // "done" while its own rows are unwritten looks empty on the results page.
+  await flush();
+
+  await db.setUploadStatus(
+    upload.id,
+    failures.length ? "error" : "done",
+    failures.length ? failures.join("; ") : null,
+  );
+  console.log(`[upload ${upload.id}] ${failures.length ? "FAILED" : "done"}`);
+}
+
+async function pollUploads() {
+  if (uploadRunning || shuttingDown) return;
+  uploadRunning = true;
+  try {
+    const upload = await db.claimPendingUpload();
+    if (upload) await runUpload(upload);
+  } catch (e) {
+    console.error("upload poll failed:", (e as Error).message);
+  } finally {
+    uploadRunning = false;
+  }
+}
+
+// ---------------------------------------------------------------- devices --
+
+/**
+ * Where a browser-paired phone's frames come out. The server re-serves what the
+ * phone pushes as MJPEG, which OpenCV opens like any other network camera — the
+ * reason none of this needed a change in ml/sidecar.py.
+ */
+const SERVER_ORIGIN = process.env.ARGUS_SERVER ?? `http://127.0.0.1:${process.env.PORT ?? 3000}`;
+const DEVICE_POLL_MS = 5000;
+
+/** Cameras this worker currently has a sidecar running for. */
+const deviceCams = new Set<string>();
+
+/**
+ * Consecutive failed starts per camera, and when to try again.
+ *
+ * A URL device pointed at an app that has been closed fails instantly, and
+ * without this the poll below would respawn it every five seconds forever —
+ * reloading YOLO, the plate detector and PaddleOCR each time, for a camera that
+ * is not there. Backing off to a minute costs nothing when the app comes back.
+ */
+const deviceFailures = new Map<string, number>();
+const deviceRetryAt = new Map<string, number>();
+const BACKOFF_MAX_MS = 60_000;
+
+/**
+ * Start a sidecar for every paired device, stop those that went away.
+ *
+ * Device sidecars do NOT use the automatic restart path. A phone that closes
+ * its tab makes the MJPEG stream end immediately, and a restarting sidecar
+ * would reload YOLO and PaddleOCR every two seconds for as long as the tab
+ * stayed shut. Letting it exit and respawning from this poll instead gives a
+ * five-second floor on that loop for free.
+ */
+async function pollDevices() {
+  if (shuttingDown) return;
+  let active: Awaited<ReturnType<typeof db.activeDeviceSources>>;
+  try {
+    active = await db.activeDeviceSources();
+  } catch (e) {
+    console.error("device poll failed:", (e as Error).message);
+    return;
+  }
+
+  const wanted = new Set(active.map((d) => d.camera_id));
+  for (const cam of deviceCams) {
+    if (wanted.has(cam)) continue;
+    console.log(`[${cam}] device gone, stopping sidecar`);
+    children.get(cam)?.kill();
+    deviceCams.delete(cam);
+  }
+
+  const now = Date.now();
+  const fresh = active.filter((d) =>
+    !deviceCams.has(d.camera_id) && (deviceRetryAt.get(d.camera_id) ?? 0) <= now);
+  if (!fresh.length) return;
+
+  // A device brings a new camera row with it, and Module C reads the topology
+  // from memory.
+  calibration = await db.getCalibration();
+  links = await db.getLinks({ includeUploads: true });
+
+  for (const d of fresh) {
+    const source = d.kind === "url" && d.source_url
+      ? d.source_url
+      : `${SERVER_ORIGIN}/cam-stream/${d.camera_id}`;
+    console.log(`[${d.camera_id}] device sidecar <- ${source}`);
+    deviceCams.add(d.camera_id);
+    children.set(d.camera_id, start({ id: d.camera_id, source }, {
+      onExit: (code) => {
+        deviceCams.delete(d.camera_id);
+        if (code === 0) {
+          deviceFailures.delete(d.camera_id);
+          deviceRetryAt.delete(d.camera_id);
+          console.log(`[${d.camera_id}] device sidecar finished`);
+          return;
+        }
+        const n = (deviceFailures.get(d.camera_id) ?? 0) + 1;
+        deviceFailures.set(d.camera_id, n);
+        const wait = Math.min(DEVICE_POLL_MS * 2 ** (n - 1), BACKOFF_MAX_MS);
+        deviceRetryAt.set(d.camera_id, Date.now() + wait);
+        console.log(`[${d.camera_id}] device sidecar exited (${code}), ` +
+                    `retry in ${Math.round(wait / 1000)}s (failure ${n})`);
+      },
+    }));
+  }
+}
+
 // ------------------------------------------------------------------- boot --
 
 const children = new Map<string, ChildProcess>();
@@ -344,11 +549,11 @@ async function boot() {
   if (!(await db.ping())) {
     console.error(
       "cannot reach the database at DATABASE_URL.\n" +
-      "  docker compose up -d db redis && npm run db:setup",
+      "  sudo ./scripts/postgres-local.sh && npm run db:setup",
     );
     process.exit(1);
   }
-  links = await db.getLinks();
+  links = await db.getLinks({ includeUploads: true });
   calibration = await db.getCalibration();
   if (!links.length) {
     console.warn(
@@ -359,8 +564,14 @@ async function boot() {
   }
   console.log(`topology: ${calibration.size} cameras, ${links.length} links`);
 
+  // An upload left "running" by a killed worker would never be picked up again.
+  const requeued = await db.requeueStaleUploads();
+  if (requeued) console.log(`requeued ${requeued} upload(s) interrupted by a restart`);
+
   setInterval(() => void flush(), FLUSH_MS);
   setInterval(() => void rollup(), ROLLUP_MS);
+  setInterval(() => void pollUploads(), UPLOAD_POLL_MS);
+  setInterval(() => void pollDevices(), DEVICE_POLL_MS);
 
   for (const cam of CAMERAS) {
     console.log(`spawning sidecar for ${cam.id} <- ${cam.source}`);

@@ -22,7 +22,6 @@
     "@deck.gl/layers": "^9.0.0",
     "@deck.gl/react": "^9.0.0",
     "bullmq": "^5.0.0",
-    "ioredis": "^5.4.0",
     "maplibre-gl": "^4.7.0",
     "next": "^15.0.0",
     "postgres": "^3.4.0",

@@ -13,7 +13,7 @@
 import postgres from "postgres";
 import type {
   Alert, AnalyticsResponse, Camera, CameraLink, Hop, MatchMethod,
-  SearchResult, Track, Trajectory, VehicleType,
+  Device, SearchResult, Track, Trajectory, Upload, UploadResult, VehicleType,
 } from "@/contract";
 import { bucketize, type CameraCalibration, type DetectionRow } from "@/server/analytics";
 
@@ -73,6 +73,7 @@ export async function getCameras(): Promise<Camera[]> {
       LEFT JOIN LATERAL (
         SELECT max(ts) AS last_seen FROM detections WHERE camera_id = c.id
       ) d ON true
+     WHERE NOT c.is_upload
      ORDER BY c.id`;
 
   return rows.map((r) => ({
@@ -89,11 +90,26 @@ export async function getCameras(): Promise<Camera[]> {
   }));
 }
 
-export async function getLinks(): Promise<CameraLink[]> {
+/**
+ * The road graph.
+ *
+ * `includeUploads` defaults to false because /api/cameras/links must describe
+ * the same world /api/cameras does: a link naming a camera the caller cannot
+ * see is a graph with a dangling edge, and the map would draw a line to
+ * nowhere. The WORKER passes true — layer 3 needs an upload's own links to
+ * reason about journeys between the operator's videos.
+ */
+export async function getLinks(
+  o: { includeUploads?: boolean } = {},
+): Promise<CameraLink[]> {
   const rows = await sql<{
     from_camera: string; to_camera: string; distance_m: number; travel_time_s: number;
   }[]>`SELECT from_camera, to_camera, distance_m, travel_time_s
-         FROM camera_links ORDER BY from_camera, to_camera`;
+         FROM camera_links
+        WHERE ${o.includeUploads ?? false}
+           OR (from_camera NOT IN (SELECT id FROM cameras WHERE is_upload)
+              AND to_camera NOT IN (SELECT id FROM cameras WHERE is_upload))
+        ORDER BY from_camera, to_camera`;
   return rows.map((r) => ({
     from: r.from_camera, to: r.to_camera,
     distance_m: r.distance_m, travel_time_s: r.travel_time_s,
@@ -124,6 +140,7 @@ interface TrackRow {
   plate_text: string | null; plate_conf: number | null;
   vehicle_type: string | null; color: string | null;
   entry_time: Date; exit_time: Date | null;
+  speed_kmh: number | null;
 }
 
 const toTrack = (r: TrackRow): Track => ({
@@ -136,6 +153,7 @@ const toTrack = (r: TrackRow): Track => ({
   color: r.color,
   entry_time: isoReq(r.entry_time),
   exit_time: iso(r.exit_time),
+  speed_kmh: r.speed_kmh,
 });
 
 export async function getTracks(
@@ -144,9 +162,13 @@ export async function getTracks(
   const limit = Math.min(Math.max(o.limit ?? 100, 1), 1000);
   const rows = await sql<TrackRow[]>`
     SELECT id, camera_id, track_id, plate_text, plate_conf, vehicle_type, color,
-           entry_time, exit_time
+           entry_time, exit_time, speed_kmh
       FROM tracks
      WHERE (${o.camera ?? null}::text IS NULL OR camera_id = ${o.camera ?? null})
+       -- Uploaded footage has its own results page and must not appear in the
+       -- live city view. Asking for one of its cameras by name still works.
+       AND (${o.camera ?? null}::text IS NOT NULL
+            OR camera_id NOT IN (SELECT id FROM cameras WHERE is_upload))
        AND (${o.since ?? null}::timestamptz IS NULL
             OR entry_time >= ${o.since ?? null}::timestamptz)
      ORDER BY entry_time DESC
@@ -158,6 +180,14 @@ export async function getTracks(
  * Candidate previous-camera tracks for the association engine. Bounded by the
  * window, because anything older than the slowest link cannot be a match, and
  * scanning further is pure cost.
+ *
+ * Bounded by the CAMERA SET too. An uploaded video is matched only against the
+ * other videos in its own upload, and a live camera only against other live
+ * cameras. Without this, a vehicle in an operator's clip matches one on a demo
+ * camera -- the same plate genuinely appears in both -- and the upload's
+ * results fill with journeys through cameras that have nothing to do with the
+ * footage they sent. `IS NOT DISTINCT FROM` is what makes NULL (a live camera)
+ * match NULL rather than matching nothing.
  */
 export async function candidateTracks(
   cameraId: string, before: string, windowSeconds: number,
@@ -172,6 +202,9 @@ export async function candidateTracks(
            entry_time, exit_time
       FROM tracks
      WHERE camera_id <> ${cameraId}
+       AND (SELECT upload_id FROM upload_sources u WHERE u.camera_id = tracks.camera_id)
+           IS NOT DISTINCT FROM
+           (SELECT upload_id FROM upload_sources u WHERE u.camera_id = ${cameraId})
        AND exit_time IS NOT NULL
        AND exit_time < ${before}::timestamptz
        AND exit_time > ${before}::timestamptz - make_interval(secs => ${windowSeconds})
@@ -259,9 +292,14 @@ export async function getTrajectories(
     started_at: Date; ended_at: Date | null;
   }[]>`
     SELECT id, plate_text, track_ids, started_at, ended_at
-      FROM trajectories
+      FROM trajectories tr
      WHERE (${o.since ?? null}::timestamptz IS NULL
             OR started_at >= ${o.since ?? null}::timestamptz)
+       -- Same reason as getTracks: an uploaded journey belongs to its upload's
+       -- page, not to the live map.
+       AND NOT EXISTS (
+         SELECT 1 FROM tracks t JOIN cameras c ON c.id = t.camera_id
+          WHERE t.id = ANY(tr.track_ids) AND c.is_upload)
      ORDER BY started_at DESC
      LIMIT ${limit}`;
   return hydrate(rows);
@@ -273,6 +311,15 @@ export async function getTrajectories(
  * Plate search. A miss is a 200 with empty arrays, never a 404 — "we searched
  * and found nothing" is a result, and the UI renders it differently from an
  * error.
+ *
+ * PREFIX match, not exact. The real query is "I saw HR26, something, a white
+ * car" — an operator rarely has all ten characters, and OCR itself drops one
+ * often enough that an exact match would hide the vehicle it did read. A full
+ * plate is a prefix of itself, so exact lookups still work unchanged.
+ *
+ * ponytail: prefix only, so a query cannot start mid-plate. Postgres uses the
+ * plate index for `LIKE 'ABC%'` and cannot for `LIKE '%ABC%'`; switch to
+ * pg_trgm if searching by the series letters alone turns out to matter.
  */
 export async function search(raw: string): Promise<SearchResult> {
   const plate = raw.toUpperCase().replace(/[^A-Z0-9]/g, "");
@@ -284,7 +331,7 @@ export async function search(raw: string): Promise<SearchResult> {
   const sightings = await sql<{ camera_id: string; ts: Date; confidence: number | null }[]>`
     SELECT camera_id, entry_time AS ts, plate_conf AS confidence
       FROM tracks
-     WHERE plate_text = ${plate}
+     WHERE plate_text LIKE ${plate + "%"}
      ORDER BY entry_time DESC
      LIMIT 200`;
 
@@ -294,7 +341,7 @@ export async function search(raw: string): Promise<SearchResult> {
   }[]>`
     SELECT id, plate_text, track_ids, started_at, ended_at
       FROM trajectories
-     WHERE plate_text = ${plate}
+     WHERE plate_text LIKE ${plate + "%"}
      ORDER BY started_at DESC
      LIMIT 20`;
 
@@ -307,6 +354,372 @@ export async function search(raw: string): Promise<SearchResult> {
     })),
     last_seen: first ? { camera_id: first.camera_id, ts: isoReq(first.ts) } : null,
   };
+}
+
+// ----------------------------------------------------------------- uploads --
+
+/**
+ * Where uploaded cameras are drawn.
+ *
+ * An uploaded video has no location, but `cameras.lat/lon` are NOT NULL and the
+ * map draws whatever it is given. Placing them on a short arc near the city
+ * centre keeps every existing view working and makes it obvious at a glance
+ * that these are not surveyed installations.
+ *
+ * ponytail: fixed centre, fixed spacing. Add a location field to the upload
+ * form if anyone ever needs uploaded footage plotted where it was filmed.
+ */
+const UPLOAD_ORIGIN = { lat: 12.9600, lon: 77.6300 };
+const UPLOAD_SPACING_DEG = 0.004;
+
+export async function createUpload(o: {
+  label: string | null;
+  gapSeconds: number | null;
+  files: readonly { filename: string; path: string }[];
+}): Promise<string> {
+  if (!o.files.length) throw new Error("an upload needs at least one file");
+
+  const [up] = await sql<{ id: string }[]>`
+    INSERT INTO uploads (label, gap_seconds) VALUES (${o.label}, ${o.gapSeconds})
+    RETURNING id`;
+  const uploadId = String(up!.id);
+  const cameraIds: string[] = [];
+
+  for (const [i, f] of o.files.entries()) {
+    const cameraId = `UP${uploadId}-${i + 1}`;
+    cameraIds.push(cameraId);
+    await sql`
+      INSERT INTO cameras (id, name, lat, lon, heading_deg, source_uri, is_upload)
+      VALUES (${cameraId}, ${f.filename},
+              ${UPLOAD_ORIGIN.lat + i * UPLOAD_SPACING_DEG},
+              ${UPLOAD_ORIGIN.lon}, NULL, ${f.path}, true)
+      ON CONFLICT (id) DO NOTHING`;
+    await sql`
+      INSERT INTO upload_sources (upload_id, camera_id, filename, path)
+      VALUES (${uploadId}::bigint, ${cameraId}, ${f.filename}, ${f.path})`;
+  }
+
+  // Only when the operator told us how far apart the cameras are. Inventing a
+  // travel time would be worse than having none: layer 3 VETOES a journey it
+  // believes impossible, so a wrong number silently deletes real matches, while
+  // a missing one merely makes it abstain.
+  if (o.gapSeconds !== null && cameraIds.length > 1) {
+    for (const from of cameraIds) {
+      for (const to of cameraIds) {
+        if (from === to) continue;
+        await sql`
+          INSERT INTO camera_links (from_camera, to_camera, distance_m, travel_time_s)
+          VALUES (${from}, ${to}, ${Math.max(1, o.gapSeconds * 10)}, ${o.gapSeconds})
+          ON CONFLICT (from_camera, to_camera) DO NOTHING`;
+      }
+    }
+  }
+  return uploadId;
+}
+
+interface UploadRow {
+  id: string; created_at: Date; label: string | null;
+  status: string; gap_seconds: number | null; error: string | null;
+}
+
+async function withSources(rows: UploadRow[]): Promise<Upload[]> {
+  if (!rows.length) return [];
+  const ids = rows.map((r) => String(r.id));
+  const sources = await sql<{
+    upload_id: string; camera_id: string; filename: string;
+    status: string; error: string | null; tracks: number; plates: number;
+  }[]>`
+    SELECT s.upload_id, s.camera_id, s.filename, s.status, s.error,
+           count(t.id)::int AS tracks,
+           count(t.plate_text)::int AS plates
+      FROM upload_sources s
+      LEFT JOIN tracks t ON t.camera_id = s.camera_id
+     WHERE s.upload_id = ANY(${ids}::bigint[])
+     GROUP BY s.id, s.upload_id, s.camera_id, s.filename, s.status, s.error
+     ORDER BY s.id`;
+
+  return rows.map((r) => ({
+    id: String(r.id),
+    created_at: isoReq(r.created_at),
+    label: r.label,
+    status: r.status as Upload["status"],
+    gap_seconds: r.gap_seconds,
+    error: r.error,
+    sources: sources
+      .filter((s) => String(s.upload_id) === String(r.id))
+      .map((s) => ({
+        camera_id: s.camera_id,
+        filename: s.filename,
+        status: s.status as Upload["status"],
+        error: s.error,
+        tracks: s.tracks,
+        plates: s.plates,
+      })),
+  }));
+}
+
+export async function getUploads(limit = 20): Promise<Upload[]> {
+  const n = Math.min(Math.max(limit, 1), 100);
+  const rows = await sql<UploadRow[]>`
+    SELECT id, created_at, label, status, gap_seconds, error
+      FROM uploads ORDER BY created_at DESC LIMIT ${n}`;
+  return withSources(rows);
+}
+
+export async function getUpload(id: string): Promise<Upload | null> {
+  const rows = await sql<UploadRow[]>`
+    SELECT id, created_at, label, status, gap_seconds, error
+      FROM uploads WHERE id = ${id}::bigint`;
+  return (await withSources(rows))[0] ?? null;
+}
+
+/**
+ * Everything the results page shows for one upload: the vehicles read out of
+ * its videos, and any journey Module C stitched between them.
+ */
+export async function getUploadResult(id: string): Promise<UploadResult | null> {
+  const upload = await getUpload(id);
+  if (!upload) return null;
+  const cams = upload.sources.map((s) => s.camera_id);
+  if (!cams.length) return { upload, plates: [], trajectories: [] };
+
+  const plates = await sql<{
+    camera_id: string; track_id: string; plate_text: string | null;
+    plate_conf: number | null; vehicle_type: string | null;
+    entry_time: Date; speed_kmh: number | null;
+  }[]>`
+    SELECT camera_id, track_id, plate_text, plate_conf, vehicle_type,
+           entry_time, speed_kmh
+      FROM tracks
+     WHERE camera_id = ANY(${cams})
+     -- Vehicles whose plate was read first: that is what the page is for.
+     ORDER BY (plate_text IS NULL), entry_time DESC
+     LIMIT 500`;
+
+  const trajRows = await sql<{
+    id: string; plate_text: string | null; track_ids: string[];
+    started_at: Date; ended_at: Date | null;
+  }[]>`
+    SELECT tr.id, tr.plate_text, tr.track_ids, tr.started_at, tr.ended_at
+      FROM trajectories tr
+     WHERE EXISTS (SELECT 1 FROM tracks t
+                    WHERE t.id = ANY(tr.track_ids) AND t.camera_id = ANY(${cams}))
+       -- EVERY leg must belong to this upload. A journey that also passes
+       -- through a live camera is not this upload's journey, and showing it
+       -- would put footage the operator never sent on their results page.
+       AND NOT EXISTS (SELECT 1 FROM tracks t
+                        WHERE t.id = ANY(tr.track_ids) AND NOT (t.camera_id = ANY(${cams})))
+     ORDER BY tr.started_at DESC
+     LIMIT 100`;
+
+  return {
+    upload,
+    plates: plates.map((p) => ({
+      camera_id: p.camera_id,
+      track_id: p.track_id,
+      plate_text: p.plate_text,
+      plate_conf: p.plate_conf,
+      vehicle_type: (p.vehicle_type ?? "car") as VehicleType,
+      entry_time: isoReq(p.entry_time),
+      speed_kmh: p.speed_kmh,
+    })),
+    trajectories: await hydrate(trajRows),
+  };
+}
+
+/**
+ * Take the oldest pending upload and mark it running, atomically.
+ *
+ * SKIP LOCKED so two workers never claim the same one. There is only one worker
+ * today, but a queue that quietly double-processes is a bad thing to discover
+ * during a demo, and the clause costs nothing.
+ */
+export async function claimPendingUpload(): Promise<Upload | null> {
+  const rows = await sql<UploadRow[]>`
+    UPDATE uploads SET status = 'running'
+     WHERE id = (SELECT id FROM uploads WHERE status = 'pending'
+                  ORDER BY created_at LIMIT 1 FOR UPDATE SKIP LOCKED)
+    RETURNING id, created_at, label, status, gap_seconds, error`;
+  return (await withSources(rows))[0] ?? null;
+}
+
+/**
+ * The on-disk locations of an upload's files.
+ *
+ * Separate from `getUpload` on purpose: `UploadSource` in the contract has no
+ * `path`, because a browser has no business learning where files sit on the
+ * server's filesystem. The worker does need it, and the worker is not a
+ * browser.
+ */
+export async function uploadSourcePaths(
+  uploadId: string,
+): Promise<{ camera_id: string; filename: string; path: string }[]> {
+  return sql<{ camera_id: string; filename: string; path: string }[]>`
+    SELECT camera_id, filename, path FROM upload_sources
+     WHERE upload_id = ${uploadId}::bigint ORDER BY id`;
+}
+
+export async function setUploadStatus(
+  id: string, status: Upload["status"], error: string | null = null,
+): Promise<void> {
+  await sql`UPDATE uploads SET status = ${status}, error = ${error}
+             WHERE id = ${id}::bigint`;
+}
+
+export async function setUploadSourceStatus(
+  cameraId: string, status: Upload["status"], error: string | null = null,
+): Promise<void> {
+  await sql`UPDATE upload_sources SET status = ${status}, error = ${error}
+             WHERE camera_id = ${cameraId}`;
+}
+
+/** Uploads interrupted by a worker restart. Left running, they never finish. */
+export async function requeueStaleUploads(): Promise<number> {
+  const rows = await sql`
+    UPDATE uploads SET status = 'pending' WHERE status = 'running' RETURNING id`;
+  return rows.length;
+}
+
+// ----------------------------------------------------------------- devices --
+
+/**
+ * Pairing-code alphabet. No 0/O, no 1/I/L: the code is read off a laptop screen
+ * and typed on a phone, and those are the pairs people get wrong.
+ */
+const CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+const CODE_LENGTH = 6;
+
+const newCode = () => Array.from(
+  { length: CODE_LENGTH },
+  () => CODE_ALPHABET[Math.floor(Math.random() * CODE_ALPHABET.length)],
+).join("");
+
+/** Where devices are drawn until someone surveys them. See UPLOAD_ORIGIN. */
+const DEVICE_ORIGIN = { lat: 12.9700, lon: 77.5900 };
+const DEVICE_SPACING_DEG = 0.003;
+
+interface DeviceRow {
+  id: string; code: string; camera_id: string; label: string | null;
+  kind: string | null; source_url: string | null;
+  created_at: Date; paired_at: Date | null; last_frame_at: Date | null;
+  revoked: boolean;
+}
+
+/**
+ * `pair_url` is built by the caller from the REQUEST host, not from a config
+ * value: the whole point is that a phone must reach it, and the server has no
+ * way of knowing which of its addresses the operator's laptop is being browsed
+ * on. Passing "" is correct for callers with no request in hand.
+ */
+function toDevice(r: DeviceRow, origin = ""): Device {
+  const age = r.last_frame_at ? Date.now() - r.last_frame_at.getTime() : null;
+  // "live" means SOMETHING IS ARRIVING, for both kinds. A browser device is
+  // touched by the frames it pushes; a URL device is touched by the worker when
+  // its sidecar opens the stream. Reporting a URL device as live merely because
+  // a URL was typed would show a green camera for an app that was closed hours
+  // ago, which is worse than showing nothing.
+  const status: Device["status"] =
+    r.revoked ? "revoked"
+    : age !== null && age < DEVICE_STALE_MS ? "live"
+    : r.paired_at ? "stale"
+    : "waiting";
+  return {
+    id: String(r.id),
+    code: r.code,
+    camera_id: r.camera_id,
+    label: r.label,
+    kind: r.kind as Device["kind"],
+    source_url: r.source_url,
+    status,
+    created_at: isoReq(r.created_at),
+    paired_at: iso(r.paired_at),
+    last_frame_at: iso(r.last_frame_at),
+    pair_url: `${origin}/cam/${r.code}`,
+  };
+}
+
+/** Longer than frames.ts STALE_MS: last_frame_at is written once a second, so a
+ *  tighter bound would flap a perfectly healthy phone in and out of "live". */
+const DEVICE_STALE_MS = 20_000;
+
+export async function createDevice(label: string | null): Promise<Device> {
+  // Retry on the unique index rather than pre-checking: with 31^6 codes a
+  // collision is vanishingly rare, and a SELECT-then-INSERT is a race anyway.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const code = newCode();
+    const n = await sql<{ n: number }[]>`SELECT count(*)::int n FROM devices`;
+    const cameraId = `PHONE${(n[0]?.n ?? 0) + 1}`;
+    try {
+      await sql`
+        INSERT INTO cameras (id, name, lat, lon, heading_deg, source_uri)
+        VALUES (${cameraId}, ${label ?? cameraId},
+                ${DEVICE_ORIGIN.lat + (n[0]?.n ?? 0) * DEVICE_SPACING_DEG},
+                ${DEVICE_ORIGIN.lon}, NULL, NULL)
+        ON CONFLICT (id) DO NOTHING`;
+      const rows = await sql<DeviceRow[]>`
+        INSERT INTO devices (code, camera_id, label)
+        VALUES (${code}, ${cameraId}, ${label})
+        RETURNING *`;
+      return toDevice(rows[0]!);
+    } catch (e) {
+      if (attempt === 4) throw e;
+    }
+  }
+  throw new Error("could not allocate a pairing code");
+}
+
+export async function getDevices(): Promise<Device[]> {
+  const rows = await sql<DeviceRow[]>`
+    SELECT * FROM devices WHERE NOT revoked ORDER BY created_at DESC LIMIT 50`;
+  return rows.map((r) => toDevice(r));
+}
+
+export async function getDeviceByCode(code: string): Promise<Device | null> {
+  const rows = await sql<DeviceRow[]>`
+    SELECT * FROM devices WHERE code = ${code.toUpperCase()} AND NOT revoked`;
+  return rows[0] ? toDevice(rows[0]) : null;
+}
+
+/**
+ * Claim a code. Idempotent: a phone that reconnects re-pairs the same device.
+ *
+ * Returns null for an unknown or revoked code, which is what makes the code the
+ * credential — nothing downstream accepts frames without a device coming back
+ * from here.
+ */
+export async function pairDevice(
+  code: string, kind: Device["kind"], sourceUrl: string | null,
+): Promise<Device | null> {
+  const rows = await sql<DeviceRow[]>`
+    UPDATE devices
+       SET kind = ${kind}, source_url = ${sourceUrl},
+           paired_at = COALESCE(paired_at, now())
+     WHERE code = ${code.toUpperCase()} AND NOT revoked
+    RETURNING *`;
+  return rows[0] ? toDevice(rows[0]) : null;
+}
+
+export async function touchDevice(cameraId: string): Promise<void> {
+  await sql`UPDATE devices SET last_frame_at = now() WHERE camera_id = ${cameraId}`;
+}
+
+export async function revokeDevice(id: string): Promise<boolean> {
+  const rows = await sql`
+    UPDATE devices SET revoked = true, kind = NULL, source_url = NULL
+     WHERE id = ${id}::bigint AND NOT revoked RETURNING id`;
+  return rows.length > 0;
+}
+
+/** What the worker needs: every device with something to decode right now. */
+export async function activeDeviceSources(): Promise<
+  { camera_id: string; kind: string; source_url: string | null }[]
+> {
+  return sql<{ camera_id: string; kind: string; source_url: string | null }[]>`
+    SELECT camera_id, kind, source_url
+      FROM devices
+     WHERE NOT revoked AND kind IS NOT NULL
+       AND (kind = 'url'
+            OR last_frame_at > now() - make_interval(secs => ${DEVICE_STALE_MS / 1000}))`;
 }
 
 // --------------------------------------------------------------- analytics --
@@ -331,6 +744,10 @@ export async function getAnalytics(
         ON t.camera_id = d.camera_id AND t.track_id = d.track_id
      WHERE d.ts > now() - make_interval(hours => ${hours})
        AND (${camera ?? null}::text IS NULL OR d.camera_id = ${camera ?? null})
+       -- City-wide analytics counts live cameras. Uploaded footage is reported
+       -- on its own page, and is included here only when asked for by name.
+       AND (${camera ?? null}::text IS NOT NULL
+            OR d.camera_id NOT IN (SELECT id FROM cameras WHERE is_upload))
      ORDER BY d.ts`;
 
   const cal = await getCalibration();
@@ -370,7 +787,8 @@ export async function getAnalytics(
 
 // ------------------------------------------------------------------ alerts --
 
-export async function getAlerts(acked?: boolean): Promise<Alert[]> {
+export async function getAlerts(acked?: boolean, limit = 200): Promise<Alert[]> {
+  const n = Math.min(Math.max(limit, 1), 500);
   const rows = await sql<{
     id: string; ts: Date; camera_id: string | null; kind: string; severity: string;
     track_id: string | null; plate_text: string | null; detail: string | null; acked: boolean;
@@ -378,8 +796,10 @@ export async function getAlerts(acked?: boolean): Promise<Alert[]> {
     SELECT id, ts, camera_id, kind, severity, track_id, plate_text, detail, acked
       FROM alerts
      WHERE (${acked ?? null}::boolean IS NULL OR acked = ${acked ?? null})
+       AND (camera_id IS NULL
+            OR camera_id NOT IN (SELECT id FROM cameras WHERE is_upload))
      ORDER BY ts DESC
-     LIMIT 200`;
+     LIMIT ${n}`;
   return rows.map((r) => ({
     id: String(r.id),
     ts: isoReq(r.ts),
@@ -455,6 +875,18 @@ export async function upsertTrack(t: {
   return String(rows[0]!.id);
 }
 
+/**
+ * The one column that cannot be filled at INSERT time: speed needs the track's
+ * whole detection history, and at upsert the last frames are still buffered.
+ */
+export async function setTrackSpeed(
+  cameraId: string, trackId: string, kmh: number,
+): Promise<void> {
+  await sql`
+    UPDATE tracks SET speed_kmh = ${kmh}
+     WHERE camera_id = ${cameraId} AND track_id = ${trackId}`;
+}
+
 export async function insertMatch(m: {
   from_track: string; to_track: string; method: string;
   confidence: number; travel_time_s: number;
@@ -499,6 +931,20 @@ export async function extendTrajectory(
 
   const existing = found[0];
   if (existing) {
+    // A trajectory is a path, and a path cannot visit the same node twice.
+    // Appending a track already in the chain produces a cycle, and the
+    // timestamps along it then run backwards -- the contract's own ordering
+    // check catches it, but only after the bad row is stored.
+    //
+    // The cause was sidecars reusing track ids after a restart, fixed by
+    // RUN_ID in ml/sidecar.py. This stays as the guard that makes an invalid
+    // trajectory impossible to write, whatever produces the match.
+    if (existing.track_ids.map(String).includes(String(toTrack))) {
+      console.warn(
+        `trajectory ${existing.id} already contains track ${toTrack}; ` +
+        `refusing to append and create a cycle`);
+      return { id: String(existing.id), track_ids: existing.track_ids.map(String) };
+    }
     const rows = await sql<{ id: string; track_ids: string[] }[]>`
       UPDATE trajectories
          SET track_ids = array_append(track_ids, ${toTrack}::bigint),

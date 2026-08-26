@@ -32,13 +32,76 @@ ml/sidecar.py (one per camera)   ← the only runtime Python
   stdout: {"event":"detection"|"track_closed"|"ready"|"error", ...}
                     │  newline-delimited JSON
 worker/ingest.ts    ▼   spawns + restarts sidecars, validates against contract
-  → Postgres/TimescaleDB (src/server/db.ts), → Redis pub/sub (src/server/bus.ts)
+  → Postgres/TimescaleDB (src/server/db.ts), → LISTEN/NOTIFY (src/server/bus.ts)
                     │
 server.ts           ▼   ONE process: Next UI + /api handlers + /ws upgrade
   src/server/association.ts   Module C ★ (cross-camera, 3-layer)
   src/server/analytics.ts     Module D
-  src/app/(dashboard)         Module E — four views (deck.gl, MapLibre, Recharts)
+  src/app/(dashboard)         Module E — six views (deck.gl, MapLibre, Recharts)
+  src/server/frames.ts        phone JPEG in, MJPEG out for the sidecar
 ```
+
+### A phone is just another camera
+
+`/devices` issues a six-character pairing code, and the code can be satisfied
+two ways because `getUserMedia` only works in a **secure context**:
+
+| route | how | needs |
+|---|---|---|
+| `browser` | the phone opens `/cam/<code>`, captures at 5 fps and 640px, pushes JPEG over `/ws/cam` | HTTPS, or localhost |
+| `url` | an IP-camera app on the phone serves RTSP/MJPEG; the code records the URL | nothing |
+
+This laptop's own webcam works with no certificate at all — `localhost` is
+always a secure context. A phone at `http://<lan-ip>:3000` is not, and the
+browser refuses the camera with no way for the page to ask again. Run
+`./scripts/dev-https.sh` once and `server.ts` serves HTTPS on 3443 alongside
+the usual port; the phone accepts the self-signed warning once, and that
+warning IS the step that makes the origin secure.
+
+`src/server/frames.ts` bridges the two halves: JPEG in over a WebSocket, MJPEG
+out at `/cam-stream/<camera_id>`, which the sidecar opens like any network
+camera — **`ml/sidecar.py` needed no change at all**. Latest frame wins, no
+queue: a phone on a slow network should show the newest frame, not work through
+a backlog, and that also bounds memory at one frame per device.
+
+The MJPEG route is served from `server.ts` directly, before Next sees the
+request. Next buffers and transforms responses in ways an endless multipart
+stream does not survive.
+
+A paired device is a **real live camera**: it appears on the dashboard, the map
+and the analytics beside CAM1..CAM4. It carries no `camera_links`, so layer 3
+abstains on it rather than inventing a road graph.
+
+`ready` is emitted **after the capture opens**, not at startup. The supervisor
+treats it as proof a phone is really serving video; emitted earlier, a device
+whose app had been closed would report itself healthy forever. Device sidecars
+back off 5s, 10s, 20s… to a minute on repeated failure, because a dead stream
+otherwise reloads YOLO and PaddleOCR every five seconds.
+
+### Uploaded video is just another camera
+
+`/upload` takes video files off the operator's machine. Each file becomes a row
+in `cameras` with `is_upload = true`, so detections, tracks, Module C and the
+analytics rollup work on it with **no special case anywhere**. Only two things
+know an upload happened:
+
+- `candidateTracks()` will not compare a track across the upload boundary — an
+  uploaded video matches only the other videos in its own upload, and a live
+  camera only other live cameras. Without that, an operator's clip matches demo
+  footage and their results page fills with cameras they never sent.
+- `getCameras/getTracks/getTrajectories/getAnalytics/getAlerts` exclude
+  `is_upload` cameras, so uploaded footage never moves the city's numbers.
+  Asking for one of those cameras **by name** still works, which is how the
+  upload's own page reads it.
+
+The server never spawns a sidecar. It writes the file, inserts a `pending` row,
+and the worker picks it up — decoding video inside the web process is exactly
+what the two-process split exists to prevent.
+
+Uploaded files are assumed to cover the **same period**, as two cameras at a
+junction would, so the interval between sightings is measured from the footage.
+The optional travel-time field only feeds `camera_links`; it is not a playback
+offset.
 
 `src/contract.ts` holds zod schemas for every REST response, every WebSocket
 message, and the sidecar's JSON events. **Types are inferred from it**, so the
@@ -71,17 +134,24 @@ stack immature, inference-only), 30 GB RAM.
 
 ## Train exactly one model — on Kaggle
 
-### Measured, on 169 held-out Indian plate photos the model never trained on
+### Measured against 45 hand-labelled plates, `ml/groundtruth_test50.csv`
 
 | Stage | Result |
 |---|---|
 | Detector mAP50 / precision / recall | **0.928 / 0.957 / 0.912** |
-| Plate box found | 161/169 (95%) |
-| Read and validated | 105/161 (65% yield) |
-| **End to end** | **105/169 (62%)** |
+| Plate box found | 44/45 |
+| **Read correctly** | **35/45 (78%)** |
+| Read wrongly | 2 (4%) |
+| Not read | 8 (18%) |
+| Precision when it answers | 95% |
 
-`npm run` equivalent: `python ml/validate_plate.py --model
-runs/detect/plate/weights/best.pt --data ~/indian-plates --ocr`.
+```bash
+python ml/score_plates.py --model runs/detect/plate/weights/best.pt --show
+```
+
+`ml/validate_plate.py` reports *yield* over 169 photos instead — 62% — which is
+an upper bound, not accuracy: nothing there checks a read against the true
+plate, so a confident wrong answer counts as a success. Quote the 78%.
 
 **The detector is not the bottleneck — OCR is.** It finds a plate in 95% of
 photos; a third of those still fail to read. Three fixes took end-to-end from
@@ -110,15 +180,25 @@ plate for fifty images is half an hour and is required before quoting a number.
 | Re-ID (OSNet) | Pretrained `osnet_x1_0`. Training it is days, payoff small. |
 | OCR (PaddleOCR) | Pretrained + `correct_plate()` in `ml/sidecar.py`. |
 
-Kaggle T4: ~20-40 s/epoch, so 50 epochs is ~20-35 min. Local `--cpu` fallback is
-~6-15 min/epoch, 15-25x slower — only if Kaggle is unavailable.
+Kaggle T4 at 1,683 images: ~10 s/epoch, so 60 epochs is ~10 min. Local `--cpu`
+measured 4.2 min/epoch at 8,023 images, so roughly 1 min/epoch here — about an
+hour for 60.
 
-**The shipped weights used 3,400 of the 8,823 available images** (`SUBSET=3000`,
-`VAL=400` in `ml/kaggle_train.ipynb`), 50 epochs at `imgsz=640`. So no, the
-dataset is not exhausted. Retraining on all of it is one Kaggle hour and would
-plausibly move mAP50 from 0.928 to ~0.94 — which is **+3 images out of 169**,
-against the 56 that the detector finds and OCR cannot read. Do it only after
-OCR yield stops being the limit.
+**The shipped weights trained on 1,365 of 8,823 images.** Each split zip carried
+its own `_annotations.coco.json` at the archive root, so unzipping them into one
+folder left only the last split's labels. The warning scrolled past in the
+Kaggle log and training continued.
+
+Retraining on all 8,023 fixed the mAP — 0.928 to **0.991** — and made the system
+**worse**: 33 of 45 read correctly instead of 35, with wrong reads doubling. A
+better-fitted detector crops tighter, and the last character falls outside the
+box. `PLATE_PAD` in `ml/sidecar.py` and `score_plates.py --pad` exist for this.
+
+**Judge a detector by `correct`, never by mAP.** Full procedure, both training
+routes, and the current dataset ([Quobotic Indian number plate on Roboflow][ds])
+are in `ml/TRAINING.md`.
+
+[ds]: https://universe.roboflow.com/quobotic/indian-number-plate
 
 Develop the sidecar against stock `yolov8n.pt` + a stub plate region; trained
 weights are a one-line swap at a single call site.
@@ -158,7 +238,7 @@ gives six weak embeddings instead of one good one.
 | | Dev A | Dev B |
 |---|---|---|
 | Owns | `src/server/**`, `src/app/api/**`, `worker/**`, `ml/**`, `db/**`, `server.ts` | `src/app/(dashboard)/**`, `src/components/**`, `demo/**` |
-| Scope | Sidecar pipeline, Module C, analytics, REST + WebSocket, Drizzle/Postgres, Redis | Camera grid, deck.gl map, charts, vehicle search, alerts, camera graph data, demo video |
+| Scope | Sidecar pipeline, Module C, analytics, REST + WebSocket, Postgres/TimescaleDB | Camera grid, deck.gl map, charts, vehicle search, alerts, camera graph data, demo video |
 
 Shared, changed by neither alone: `src/contract.ts`, `db/schema.sql`.
 
@@ -169,7 +249,8 @@ say so.**
 ## Commands
 
 ```bash
-docker compose up -d db redis   # TimescaleDB + Redis
+sudo ./scripts/postgres-local.sh   # native Postgres 16 + TimescaleDB, once
+# or: docker compose up -d db          # the container route
 npm run db:setup     # apply db/schema.sql (idempotent) + seed camera topology
 npm run dev          # Next UI + /api + /ws on :3000  (custom server)
 npm run worker       # ingest supervisor + Python sidecars
@@ -180,6 +261,10 @@ npm run smoke        # every endpoint over real HTTP, judged by the zod contract
 # End-to-end with no video, no CV deps, no GPU: synthetic sidecars that emit
 # a vehicle travelling CAM1 -> CAM3 -> CAM2 (third leg has no readable plate).
 ARGUS_PYTHON=python3 ARGUS_CAMERAS='CAM1=demo,CAM3=demo' npm run worker
+
+./scripts/dev-https.sh          # self-signed cert, so a PHONE can use its camera
+npx tsx db/repair.ts            # report trajectories that break the contract
+npx tsx db/repair.ts --apply    # delete them
 
 python ml/sidecar.py --selfcheck --camera X --source X   # plate-correction check
 python ml/demo_detect.py --source photo.jpg --ocr        # eyeball the detector
@@ -287,14 +372,14 @@ OCR silently reads nothing forever.
 | `src/contract.ts`, `src/server/mock.ts` | Done, selfchecked |
 | `src/server/association.ts` — **Module C ★** | Done, selfchecked |
 | `src/server/analytics.ts` — Module D | Done, selfchecked |
-| `src/server/db.ts`, `src/server/bus.ts` | Done — all SQL, Redis pub/sub |
+| `src/server/db.ts`, `src/server/bus.ts` | Done — all SQL, LISTEN/NOTIFY pub/sub |
 | Real `/api/*` routes | Done, contract-validated, smoke-tested |
 | `worker/ingest.ts` | Done — writes, associates, alerts, rollup, publishes |
 | `ml/sidecar.py` | Done — `run()` is the real decode/track/OCR/ReID loop |
 | `test/smoke.ts` | 38 checks incl. a live end-to-end pipeline run |
-| Trained plate weights | Done — mAP50 0.950 on held-out Indian plates |
-| `src/app/(dashboard)` | Not started — Dev B |
-| Real traffic footage | Not started. `ml/make_demo_clips.py` is a fixture, not the demo |
+| Trained plate weights | Done — 35/45 plates read correctly (78%) |
+| `src/app/(dashboard)` | Done — live, map, analytics, search, upload, devices |
+| Real traffic footage | Upload it at `/upload` — no code change needed |
 
 ## Non-negotiable
 

@@ -19,6 +19,8 @@ const VIEWS = [
   { href: "/map", label: "Map" },
   { href: "/analytics", label: "Analytics" },
   { href: "/search", label: "Search" },
+  { href: "/upload", label: "Upload" },
+  { href: "/devices", label: "Devices" },
 ];
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
@@ -40,7 +42,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
         </Link>
         <div style={{ display: "flex", gap: ".35rem" }}>
           {VIEWS.map((v) => {
-            const active = path === v.href;
+            const active = v.href === "/" ? path === "/" : path.startsWith(v.href);
             return (
               <Link key={v.href} href={v.href} style={{
                 padding: ".3rem .8rem", borderRadius: 6, fontSize: 13,

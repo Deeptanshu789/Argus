@@ -27,3 +27,15 @@ ml/demo_out/
 
 # Synthetic test clips from ml/make_demo_clips.py — regenerate, never commit.
 demo/*.mp4
+
+# Local working notes — machine state, not project rules.
+.claude/CONTEXT.md
+
+# JVM crash dumps (an OpenVINO dependency leaves these behind)
+hs_err_pid*.log
+
+# Video uploaded through the dashboard. Operator files, never committed.
+uploads/
+
+# Self-signed certificate for the HTTPS dev proxy. Never committed.
+.certs/

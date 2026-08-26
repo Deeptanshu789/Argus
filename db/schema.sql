@@ -61,6 +61,11 @@ CREATE TABLE IF NOT EXISTS tracks (
 CREATE INDEX IF NOT EXISTS tracks_plate ON tracks (plate_text) WHERE plate_text IS NOT NULL;
 CREATE INDEX IF NOT EXISTS tracks_cam_exit ON tracks (camera_id, exit_time DESC);
 
+-- Written once, when the track closes and its whole detection history is
+-- known. Null when the track is too short to time, or when the camera has no
+-- metres-per-pixel survey -- a blank speed is honest, a zero is not.
+ALTER TABLE tracks ADD COLUMN IF NOT EXISTS speed_kmh REAL;
+
 -- Per-frame detections. High volume, time-series -> hypertable.
 CREATE TABLE IF NOT EXISTS detections (
     ts           TIMESTAMPTZ NOT NULL,
@@ -125,3 +130,72 @@ CREATE TABLE IF NOT EXISTS alerts (
     acked       BOOLEAN NOT NULL DEFAULT false
 );
 CREATE INDEX IF NOT EXISTS alerts_open ON alerts (ts DESC) WHERE NOT acked;
+
+-- ------------------------------------------------------------------ uploads --
+
+-- Video uploaded from the operator's machine, analysed by the same sidecar
+-- pipeline as a live camera.
+--
+-- Each file in an upload becomes its own row in `cameras`, so every existing
+-- query -- tracks, trajectories, analytics, Module C -- works on uploaded
+-- footage with no special case anywhere. The upload tables only record which
+-- cameras belong to which upload, which is what lets a results page show one
+-- upload's footage and nothing else.
+CREATE TABLE IF NOT EXISTS uploads (
+    id          BIGSERIAL PRIMARY KEY,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    label       TEXT,
+    status      TEXT NOT NULL DEFAULT 'pending',  -- pending|running|done|error
+    -- Expected seconds for a vehicle to travel between the uploaded cameras.
+    -- NULL means unknown, and layer 3 of the association engine then abstains
+    -- rather than inventing a road graph: see layerTemporal in
+    -- src/server/association.ts. Supplying it lets a plate match plus plausible
+    -- timing confirm a journey on its own.
+    gap_seconds INTEGER,
+    error       TEXT
+);
+CREATE INDEX IF NOT EXISTS uploads_recent ON uploads (created_at DESC);
+
+CREATE TABLE IF NOT EXISTS upload_sources (
+    id        BIGSERIAL PRIMARY KEY,
+    upload_id BIGINT NOT NULL REFERENCES uploads(id) ON DELETE CASCADE,
+    camera_id TEXT NOT NULL UNIQUE REFERENCES cameras(id),
+    filename  TEXT NOT NULL,          -- what the operator called it
+    path      TEXT NOT NULL,          -- where it landed on disk
+    status    TEXT NOT NULL DEFAULT 'pending',
+    error     TEXT
+);
+CREATE INDEX IF NOT EXISTS upload_sources_upload ON upload_sources (upload_id);
+
+-- Cameras that came from an upload, so the dashboard can leave them out of the
+-- live city view without knowing anything about uploads.
+ALTER TABLE cameras ADD COLUMN IF NOT EXISTS is_upload BOOLEAN NOT NULL DEFAULT false;
+
+-- ------------------------------------------------------------------ devices --
+
+-- A phone or laptop acting as a camera, paired with a short code.
+--
+-- Like an upload, a device becomes a row in `cameras` -- but unlike an upload it
+-- is a REAL live camera and stays in the city views, because that is what it
+-- is. It carries no `camera_links`, so layer 3 of the association engine
+-- abstains on it rather than inventing a road graph to footage nobody surveyed.
+--
+-- Two ways to satisfy one code, recorded in `kind`:
+--   browser  the phone's own browser captures and pushes JPEG frames, which the
+--            server re-serves as MJPEG for the sidecar to read.
+--   url      an IP-camera app on the phone serves RTSP or MJPEG directly, and
+--            the sidecar reads that URL. No secure context needed, which is why
+--            it exists: getUserMedia is blocked on plain http from a phone.
+CREATE TABLE IF NOT EXISTS devices (
+    id             BIGSERIAL PRIMARY KEY,
+    code           TEXT NOT NULL UNIQUE,      -- what the operator types on the phone
+    camera_id      TEXT NOT NULL UNIQUE REFERENCES cameras(id),
+    label          TEXT,
+    kind           TEXT,                      -- browser|url, NULL until something connects
+    source_url     TEXT,                      -- kind=url only
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    paired_at      TIMESTAMPTZ,
+    last_frame_at  TIMESTAMPTZ,
+    revoked        BOOLEAN NOT NULL DEFAULT false
+);
+CREATE INDEX IF NOT EXISTS devices_live ON devices (created_at DESC) WHERE NOT revoked;

@@ -5,7 +5,10 @@
  *   npm run selfcheck
  */
 import assert from "node:assert/strict";
-import { Alert, AnalyticsResponse, Camera, CameraLink, SearchResult, Track, Trajectory } from "@/contract";
+import {
+  Alert, AnalyticsResponse, Camera, CameraLink, SearchResult, Track, Trajectory,
+  Device, Upload, UploadResult,
+} from "@/contract";
 import * as m from "@/server/mock";
 
 // Every fixture validates against the contract it claims to implement.
@@ -41,9 +44,58 @@ for (const trj of m.getTrajectories({ limit: 100 })) {
 
 const hit = m.search(m.DEMO_PLATE);
 assert.ok(hit.sightings.length && hit.last_seen, "demo plate must always be findable");
+// Prefix search: an operator types the part of the plate they saw.
+const partial = m.search(m.DEMO_PLATE.slice(0, 4));
+assert.ok(partial.sightings.length >= hit.sightings.length,
+  "a prefix must find at least what the full plate finds");
+assert.ok(m.search(m.DEMO_PLATE.toLowerCase().replace(/(.{2})/, "$1 ")).sightings.length,
+  "case and spacing must not change the result");
+assert.deepEqual(m.search("").sightings, [],
+  "an empty query matches nothing, not everything");
+
 const miss = m.search("ZZ99ZZ9999");
 assert.deepEqual(miss.trajectories, []);
 assert.equal(miss.last_seen, null, "a miss is an empty 200, never a 404");
+
+// Devices: a phone paired as a camera.
+Device.array().parse(m.getDevices());
+const dev = m.getDevices()[0]!;
+assert.ok(dev.pair_url.includes(dev.code), "the pair link must carry the code");
+assert.ok(m.getDeviceByCode(dev.code.toLowerCase()),
+  "a code typed in lower case on a phone must still resolve");
+assert.equal(m.getDeviceByCode("ZZZZZZ"), null, "an unknown code is null");
+
+const issued = m.createDevice("smoke");
+Device.parse(issued);
+assert.equal(issued.status, "waiting", "a fresh code is waiting until something connects");
+assert.equal(issued.kind, null, "a fresh code has not been claimed by either route");
+assert.ok(!/[O0IL1]/.test(issued.code),
+  `code ${issued.code} mixes characters that are misread off a screen`);
+assert.equal(m.pairDeviceUrl(issued.code, "rtsp://x/y")?.kind, "url");
+assert.ok(m.revokeDevice(issued.id), "revoke must succeed once");
+assert.equal(m.getDeviceByCode(issued.code), null, "a revoked code stops resolving");
+assert.equal(m.revokeDevice(issued.id), false, "revoking twice is not a second success");
+
+// Uploads: the mock must answer the same shapes as the live API, or the upload
+// page renders "no mock route: uploads" the moment NEXT_PUBLIC_MOCK is set.
+const ups = m.getUploads();
+assert.ok(ups.length, "the mock must ship at least one upload to design against");
+const detail = m.getUpload(ups[0]!.id);
+assert.ok(detail, "getUpload must find the upload getUploads just listed");
+UploadResult.parse(detail);
+const upCams = new Set(detail!.upload.sources.map((s) => s.camera_id));
+assert.ok(detail!.plates.every((p) => upCams.has(p.camera_id)),
+  "an upload's results must only contain its own cameras");
+assert.ok(
+  detail!.trajectories.every((t) =>
+    t.hops.every((h) => upCams.has(h.from_camera) && upCams.has(h.to_camera))),
+  "an upload's journeys must not leave its own cameras");
+assert.equal(m.getUpload("nope"), null, "an unknown upload is null, not a throw");
+
+const made = m.createUpload(["a.mp4", "b.mp4"], 168, "test");
+Upload.parse(made);
+assert.equal(made.status, "pending", "a new upload is pending until a worker runs it");
+assert.equal(made.sources.length, 2);
 
 const a = m.getAnalytics();
 assert.equal(a.series.length, 12);

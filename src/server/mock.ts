@@ -9,7 +9,8 @@
  * on refresh makes it impossible to tell a UI bug from new data.
  */
 import type {
-  Alert, AnalyticsResponse, Camera, CameraLink, SearchResult, Track, Trajectory,
+  Alert, AnalyticsResponse, Camera, CameraLink, Device, SearchResult, Track,
+  Trajectory, Upload, UploadResult,
 } from "@/contract";
 import { VehicleType } from "@/contract";
 
@@ -78,6 +79,9 @@ export const TRACKS: Track[] = (() => {
       color: pick(r, COLORS),
       entry_time: ago(entrySec),
       exit_time: ago(entrySec - int(r, 4, 20)),
+      // ~10% unmeasurable: a track too short to time, or an uncalibrated
+      // camera. The UI must render a blank speed, not "0 km/h".
+      speed_kmh: r() > 0.1 ? Math.round((18 + r() * 45) * 10) / 10 : null,
     });
   }
   out.sort((a, b) => (a.entry_time < b.entry_time ? 1 : -1));
@@ -170,18 +174,184 @@ export function getTrajectories(o: { since?: string; limit?: number } = {}) {
  * answer, and a 404 makes the UI render an error state for it.
  */
 export function search(raw: string): SearchResult {
-  const key = raw.replace(/\s/g, "").toUpperCase();
+  // Prefix, matching src/server/db.ts. An operator types what they saw, and
+  // that is rarely the whole plate.
+  const key = raw.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+  const hit = (p: string | null) => p !== null && key !== "" && p.startsWith(key);
   const sightings = TRACKS
-    .filter((t) => t.plate_text === key)
+    .filter((t) => hit(t.plate_text))
     .map((t) => ({ camera_id: t.camera_id, ts: t.entry_time, confidence: t.plate_conf }))
     .sort((a, b) => (a.ts < b.ts ? -1 : 1));
   const last = sightings[sightings.length - 1];
   return {
     plate_text: key,
-    trajectories: TRAJECTORIES.filter((t) => t.plate_text === key),
+    trajectories: TRAJECTORIES.filter((t) => hit(t.plate_text)),
     sightings,
     last_seen: last ? { camera_id: last.camera_id, ts: last.ts } : null,
   };
+}
+
+// ----------------------------------------------------------------- devices --
+//
+// A phone paired as a camera. The mock cannot receive video, so a mock device
+// never leaves "waiting" unless a URL is attached — which is honest: that is
+// exactly what the operator sees live until something connects.
+
+const DEVICES: Device[] = [
+  {
+    id: "1",
+    code: "K7M2QP",
+    camera_id: "PHONE1",
+    label: "South gate phone",
+    kind: "browser",
+    source_url: null,
+    status: "live",
+    created_at: ago(600),
+    paired_at: ago(540),
+    last_frame_at: ago(2),
+    pair_url: "/cam/K7M2QP",
+  },
+  {
+    id: "2",
+    code: "R4TXBN",
+    camera_id: "PHONE2",
+    label: null,
+    kind: null,
+    source_url: null,
+    status: "waiting",
+    created_at: ago(120),
+    paired_at: null,
+    last_frame_at: null,
+    pair_url: "/cam/R4TXBN",
+  },
+];
+
+const CODE_CHARS = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+
+export const getDevices = () => DEVICES.filter((d) => d.status !== "revoked");
+
+export const getDeviceByCode = (code: string) =>
+  DEVICES.find((d) => d.code === code.toUpperCase() && d.status !== "revoked") ?? null;
+
+export function createDevice(label: string | null): Device {
+  const r = rng(DEVICES.length + 11);
+  const code = Array.from({ length: 6 },
+    () => CODE_CHARS[Math.floor(r() * CODE_CHARS.length)]).join("");
+  const d: Device = {
+    id: String(DEVICES.length + 1),
+    code,
+    camera_id: `PHONE${DEVICES.length + 1}`,
+    label,
+    kind: null,
+    source_url: null,
+    status: "waiting",
+    created_at: iso(new Date()),
+    paired_at: null,
+    last_frame_at: null,
+    pair_url: `/cam/${code}`,
+  };
+  DEVICES.unshift(d);
+  return d;
+}
+
+export function pairDeviceUrl(code: string, url: string): Device | null {
+  const d = getDeviceByCode(code);
+  if (!d) return null;
+  d.kind = "url";
+  d.source_url = url;
+  d.status = "live";
+  d.paired_at = d.paired_at ?? iso(new Date());
+  return d;
+}
+
+export function revokeDevice(id: string): boolean {
+  const d = DEVICES.find((x) => x.id === id && x.status !== "revoked");
+  if (!d) return false;
+  d.status = "revoked";
+  d.kind = null;
+  d.source_url = null;
+  return true;
+}
+
+// ----------------------------------------------------------------- uploads --
+//
+// The mock cannot decode video, and pretending otherwise would be a lie the UI
+// then has to be built against. What it CAN do is give the upload views their
+// shapes: one finished upload with results, so the page can be styled and
+// reviewed without a worker, a database or a file on disk.
+//
+// A mock POST accepts the files and returns a `pending` upload that never
+// progresses, which is exactly what happens live when the worker is not
+// running — the honest failure to design for.
+
+const UPLOADS: Upload[] = [
+  {
+    id: "1",
+    created_at: ago(900),
+    label: "North and east gate",
+    status: "done",
+    gap_seconds: 168,
+    error: null,
+    sources: [
+      { camera_id: "UP1-1", filename: "north-gate.mp4", status: "done",
+        error: null, tracks: 16, plates: 9 },
+      { camera_id: "UP1-2", filename: "east-gate.mp4", status: "done",
+        error: null, tracks: 14, plates: 7 },
+    ],
+  },
+];
+
+export const getUploads = (limit = 20) => UPLOADS.slice(0, Math.max(limit, 1));
+
+export function getUpload(id: string): UploadResult | null {
+  const upload = UPLOADS.find((u) => u.id === id);
+  if (!upload) return null;
+  const r = rng(7);
+  const cams = upload.sources.map((s) => s.camera_id);
+  const plates = Array.from({ length: 12 }, (_, i) => {
+    const readable = r() > 0.3;
+    return {
+      camera_id: cams[i % cams.length]!,
+      track_id: `T${String(i).padStart(3, "0")}`,
+      plate_text: readable ? plate(r) : null,
+      plate_conf: readable ? Math.round((0.82 + r() * 0.17) * 100) / 100 : null,
+      vehicle_type: pick(r, TYPES),
+      entry_time: ago(int(r, 60, 880)),
+      speed_kmh: r() > 0.15 ? Math.round((20 + r() * 40) * 10) / 10 : null,
+    };
+  });
+  // Only journeys BETWEEN the uploaded videos, which is the whole promise of
+  // the results page.
+  const trajectories = TRAJECTORIES.slice(0, 2).map((t, i) => ({
+    ...t,
+    id: `U${i}`,
+    hops: t.hops.slice(0, 1).map((h) => ({ ...h, from_camera: cams[0]!, to_camera: cams[1]! })),
+    path: t.path.slice(0, 2),
+  }));
+  return { upload, plates, trajectories };
+}
+
+export function createUpload(filenames: string[], gapSeconds: number | null,
+                             label: string | null): Upload {
+  const id = String(UPLOADS.length + 1);
+  const upload: Upload = {
+    id,
+    created_at: iso(new Date()),
+    label,
+    status: "pending",
+    gap_seconds: gapSeconds,
+    error: null,
+    sources: filenames.map((filename, i) => ({
+      camera_id: `UP${id}-${i + 1}`,
+      filename,
+      status: "pending" as const,
+      error: null,
+      tracks: 0,
+      plates: 0,
+    })),
+  };
+  UPLOADS.unshift(upload);
+  return upload;
 }
 
 export function getAnalytics(camera?: string): AnalyticsResponse {
@@ -211,8 +381,9 @@ export function getAnalytics(camera?: string): AnalyticsResponse {
   };
 }
 
-export const getAlerts = (acked?: boolean) =>
-  acked === undefined ? ALERTS : ALERTS.filter((a) => a.acked === acked);
+export const getAlerts = (acked?: boolean, limit = 200) =>
+  (acked === undefined ? ALERTS : ALERTS.filter((a) => a.acked === acked))
+    .slice(0, Math.min(Math.max(limit, 1), 500));
 
 export function ackAlert(id: string) {
   const a = ALERTS.find((x) => x.id === id);

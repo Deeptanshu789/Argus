@@ -20,7 +20,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { z } from "zod";
 import {
   Alert, AnalyticsResponse, Camera, CameraLink, SearchResult,
-  ServerMessage, Track, Trajectory,
+  Device, ServerMessage, Track, Trajectory, Upload, UploadResult,
 } from "@/contract";
 
 const BASE = process.env.SMOKE_BASE ?? "http://localhost:3000";
@@ -178,6 +178,64 @@ async function contractSuite(prefix: "/api" | "/api/mock") {
     conforms(SearchResult, empty.body, "search");
   });
 
+  // Both sides must answer /uploads. The upload page is built through
+  // src/lib/api.ts like every other view, so a route the mock does not have
+  // renders "no mock route: uploads" the moment NEXT_PUBLIC_MOCK is set.
+  const uploads = await get(`${prefix}/uploads`);
+  check(`${prefix}/uploads`, () => {
+    assert(uploads.status === 200, `status ${uploads.status}`);
+    const rows = conforms(z.array(Upload), uploads.body, "uploads");
+    // An uploaded video is its own camera, and that camera must never be one
+    // of the city's — the isolation the whole feature rests on.
+    for (const u of rows) {
+      for (const src of u.sources) {
+        assert(!/^CAM/.test(src.camera_id),
+          `upload ${u.id} claims live camera ${src.camera_id}`);
+      }
+    }
+  });
+
+  const firstUpload = (uploads.body as { id: string }[] | null)?.[0]?.id;
+  if (firstUpload) {
+    const detail = await get(`${prefix}/uploads/${firstUpload}`);
+    check(`${prefix}/uploads/:id`, () => {
+      assert(detail.status === 200, `status ${detail.status}`);
+      const r = conforms(UploadResult, detail.body, "upload result");
+      const cams = new Set(r.upload.sources.map((sx) => sx.camera_id));
+      for (const t of r.trajectories) {
+        for (const h of t.hops) {
+          assert(cams.has(h.from_camera) && cams.has(h.to_camera),
+            `journey leaves the upload: ${h.from_camera}->${h.to_camera}`);
+        }
+      }
+      for (const pl of r.plates) {
+        assert(cams.has(pl.camera_id), `plate from ${pl.camera_id}, not in this upload`);
+      }
+    });
+  }
+
+  // Devices, on both sides. The upload page shipped broken under
+  // NEXT_PUBLIC_MOCK because only the live API had its route; this is the same
+  // shape of mistake, caught the same way.
+  const devices = await get(`${prefix}/devices`);
+  check(`${prefix}/devices`, () => {
+    assert(devices.status === 200, `status ${devices.status}`);
+    const rows = conforms(z.array(Device), devices.body, "devices");
+    for (const d of rows) {
+      // The pair URL is what someone types into a phone. It has to contain the
+      // code, or the operator reads out a link that pairs nothing.
+      assert(d.pair_url.includes(d.code),
+        `device ${d.id}: pair_url ${d.pair_url} does not carry code ${d.code}`);
+      assert(d.kind !== "url" || d.source_url,
+        `device ${d.id} is kind=url with no source_url for the sidecar to read`);
+    }
+  });
+
+  const unknownCode = await get(`${prefix}/devices/ZZZZZZ`);
+  check(`${prefix}/devices/:code unknown is 404`, () => {
+    assert(unknownCode.status === 404, `status ${unknownCode.status}`);
+  });
+
   const bogus = await get(`${prefix}/nope`);
   check(`${prefix}/nope is 404`, () => {
     assert(bogus.status === 404, `status ${bogus.status}`);
@@ -208,10 +266,33 @@ async function paritySuite() {
   }
 }
 
+/**
+ * The live path, end to end: publish on the bus and require it to come out of a
+ * browser's WebSocket.
+ *
+ * PUBLISHES ITS OWN MESSAGE rather than waiting for ambient traffic. Waiting
+ * passed only when the canned event loop or a busy worker happened to be
+ * running, so it reported the environment, not the transport — and it failed
+ * the moment MOCK=0 with an idle pipeline, which is a perfectly healthy state.
+ * This version exercises Postgres NOTIFY -> server -> browser and nothing else.
+ */
 async function websocketSuite() {
   console.log("\nWebSocket");
   const { WebSocket } = await import("ws");
+  const bus = await import("@/server/bus");
   const url = BASE.replace(/^http/, "ws") + "/ws";
+
+  // An alert id no real alert has, so a message from live traffic is never
+  // mistaken for ours.
+  const marker = `smoke-${Date.now()}`;
+  const sent: ServerMessage = {
+    type: "alert",
+    data: {
+      id: marker, ts: new Date().toISOString(), camera_id: null,
+      kind: "watchlist", severity: "info", track_id: null,
+      plate_text: null, detail: "smoke test", acked: false,
+    },
+  };
 
   const got = await new Promise<unknown[]>((resolve) => {
     const seen: unknown[] = [];
@@ -219,16 +300,26 @@ async function websocketSuite() {
     const done = () => { try { ws.close(); } catch { /* already gone */ } resolve(seen); };
     const timer = setTimeout(done, 12_000);
     ws.on("message", (d: Buffer) => {
-      try { seen.push(JSON.parse(d.toString())); } catch { /* junk frame */ }
-      if (seen.length >= 3) { clearTimeout(timer); done(); }
+      let msg: unknown;
+      try { msg = JSON.parse(d.toString()); } catch { return; }
+      seen.push(msg);
+      if ((msg as { data?: { id?: string } }).data?.id === marker) {
+        clearTimeout(timer);
+        done();
+      }
     });
     ws.on("error", () => { clearTimeout(timer); done(); });
+    // Publish only once the socket is really subscribed; this bus does not
+    // replay, so a message sent before the handshake is legitimately lost.
+    ws.on("open", () => { setTimeout(() => void bus.publish(bus.publisher(), sent), 300); });
   });
 
-  check("/ws delivers messages", () => {
-    assert(got.length > 0, "no messages in 12s — is the server running with MOCK=1 or a live worker?");
+  check("/ws delivers what the bus publishes", () => {
+    assert(got.some((m) => (m as { data?: { id?: string } }).data?.id === marker),
+      `published an alert and it never arrived over /ws (${got.length} other messages seen)`);
   });
   check("/ws messages satisfy ServerMessage", () => {
+    assert(got.length > 0, "nothing arrived at all");
     for (const m of got) conforms(ServerMessage, m, "ws message");
   });
 }
@@ -281,16 +372,39 @@ async function ackSuite() {
  * The synthetic sidecars drive a vehicle CAM1 -> CAM3 -> CAM2 with the third
  * leg deliberately unreadable, so a pass proves layer 1 (plate) AND layers 2+3
  * (Re-ID plus travel-time) both fire. The suite runs the worker TWICE and
- * requires the second run to add no new trajectories: a restarting sidecar
- * replays its events, and a pipeline that is not idempotent turns one journey
- * into a new duplicate on every restart.
+ * requires the second run to add no new trajectories: a pipeline that is not
+ * idempotent turns one journey into a duplicate on every replay.
+ *
+ * ARGUS_RUN_ID is pinned for both runs, and that pin is the whole reason this
+ * is a replay rather than a second journey. Sidecars normally stamp each
+ * process with a fresh run id, because a tracker numbers its tracks from 1 on
+ * every start and two different vehicles would otherwise share one row. A
+ * replay is the one case where the events really are the same observations, so
+ * it has to say so explicitly.
  */
 async function pipelineSuite() {
   console.log("\nend-to-end pipeline (synthetic sidecars)");
   const db = await import("@/server/db");
 
-  const count = async (table: string) =>
-    (await db.sql.unsafe(`select count(*)::int n from ${table}`))[0]!.n as number;
+  // Scoped to the cameras this suite drives, NOT to the whole table. A paired
+  // phone or a second worker writing at the same time would otherwise move the
+  // totals during the replay window and fail an idempotence check that is
+  // actually holding fine.
+  const CAMS = ["CAM1", "CAM2", "CAM3"];
+
+  const countMatches = async () => (await db.sql<{ n: number }[]>`
+    SELECT count(*)::int n FROM matches m
+      JOIN tracks f ON f.id = m.from_track
+      JOIN tracks t ON t.id = m.to_track
+     WHERE f.camera_id = ANY(${CAMS}) AND t.camera_id = ANY(${CAMS})`)[0]!.n;
+
+  const countTrajectories = async () => (await db.sql<{ n: number }[]>`
+    SELECT count(*)::int n FROM trajectories tr
+     WHERE NOT EXISTS (
+       SELECT 1 FROM tracks t
+        WHERE t.id = ANY(tr.track_ids) AND NOT (t.camera_id = ANY(${CAMS})))`)[0]!.n;
+
+  const counts = async () => ({ m: await countMatches(), t: await countTrajectories() });
 
   const runWorker = (seconds: number) => new Promise<void>((resolve) => {
     const w = spawn("npx", ["tsx", "worker/ingest.ts"], {
@@ -298,6 +412,7 @@ async function pipelineSuite() {
         ...process.env,
         ARGUS_PYTHON: process.env.ARGUS_PYTHON ?? "./.venv/bin/python",
         ARGUS_CAMERAS: "CAM1=demo,CAM3=demo,CAM2=demo",
+        ARGUS_RUN_ID: "smoke",
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -312,9 +427,9 @@ async function pipelineSuite() {
     void matched;
   });
 
-  const before = { m: await count("matches"), t: await count("trajectories") };
+  const before = await counts();
   await runWorker(22);
-  const afterFirst = { m: await count("matches"), t: await count("trajectories") };
+  const afterFirst = await counts();
 
   check("the pipeline produces cross-camera matches", () => {
     assert(afterFirst.m > before.m || before.m > 0,
@@ -327,7 +442,7 @@ async function pipelineSuite() {
 
   // Replay. Same events, same matches: nothing new may be created.
   await runWorker(22);
-  const afterSecond = { m: await count("matches"), t: await count("trajectories") };
+  const afterSecond = await counts();
 
   check("replaying the same events creates no duplicate matches", () => {
     assert(afterSecond.m === afterFirst.m,
@@ -374,6 +489,166 @@ async function pipelineSuite() {
  * code ran — never a snapshot of markup, which would fail on every restyle and
  * teach everyone to ignore it.
  */
+/**
+ * Video upload. Checks the API contract and, more importantly, the ISOLATION
+ * promise: an uploaded video's camera must not surface in the live city views.
+ *
+ * Does NOT wait for the worker. Decoding is already covered by pipelineSuite,
+ * and a smoke run must not depend on a second process being up. The file posted
+ * here is a few bytes with a .mp4 name — enough to exercise the endpoint, and
+ * deleted again at the end so no worker ever tries to decode it.
+ */
+async function uploadSuite() {
+  console.log("\nvideo upload");
+  const db = await import("@/server/db");
+
+  const form = new FormData();
+  form.append("files", new Blob([new Uint8Array(2048)], { type: "video/mp4" }), "smoke.mp4");
+  form.append("label", "smoke");
+  const res = await fetch(`${BASE}/api/uploads`, { method: "POST", body: form });
+  const body = await res.json();
+
+  let created: Upload | null = null;
+  check("POST /api/uploads accepts a video", () => {
+    assert(res.status === 200, `status ${res.status}: ${JSON.stringify(body)}`);
+    created = conforms(Upload, body, "POST /api/uploads");
+    assert(created.sources.length === 1, `${created.sources.length} sources, expected 1`);
+    assert(created.status === "pending", `status ${created.status}, expected pending`);
+  });
+
+  const bad = new FormData();
+  bad.append("files", new Blob([new Uint8Array(16)]), "notes.txt");
+  const rejected = await fetch(`${BASE}/api/uploads`, { method: "POST", body: bad });
+  check("a non-video is refused, not queued", () => {
+    assert(rejected.status === 415, `status ${rejected.status}, expected 415`);
+  });
+
+  const empty = await fetch(`${BASE}/api/uploads`, { method: "POST", body: new FormData() });
+  check("an upload with no files is a 400", () => {
+    assert(empty.status === 400, `status ${empty.status}, expected 400`);
+  });
+
+  const list = await get("/api/uploads");
+  check("GET /api/uploads", () => {
+    assert(list.status === 200, `status ${list.status}`);
+    const rows = conforms(z.array(Upload), list.body, "/api/uploads");
+    assert(rows.some((u) => u.id === created?.id), "the new upload is not in the list");
+  });
+
+  if (created) {
+    const id = (created as Upload).id;
+    const detail = await get(`/api/uploads/${id}`);
+    check("GET /api/uploads/:id", () => {
+      assert(detail.status === 200, `status ${detail.status}`);
+      const r = conforms(UploadResult, detail.body, `/api/uploads/${id}`);
+      assert(r.upload.id === id, "returned a different upload");
+      // Nothing has decoded it yet, and an empty result is a 200 with empty
+      // arrays — never a 404. Same rule as a search miss.
+      assert(Array.isArray(r.plates), "plates must be an array even when empty");
+    });
+
+    const cam = (created as Upload).sources[0]!.camera_id;
+    const cameras = await get("/api/cameras");
+    check("an uploaded video does not appear as a live camera", () => {
+      const rows = conforms(z.array(Camera), cameras.body, "/api/cameras");
+      assert(!rows.some((c) => c.id === cam),
+        `${cam} is showing in the live camera list; uploads must stay on their own page`);
+    });
+
+    const tracks = await get("/api/tracks?limit=500");
+    check("uploaded footage is excluded from the live track list", () => {
+      const rows = conforms(z.array(Track), tracks.body, "/api/tracks");
+      assert(!rows.some((t) => t.camera_id.startsWith("UP")),
+        "an uploaded camera's tracks are in the live view");
+    });
+
+    await db.sql`DELETE FROM uploads WHERE id = ${id}::bigint`;
+    await db.sql`DELETE FROM cameras WHERE id = ${cam}`;
+  }
+
+  const missing = await get("/api/uploads/99999999");
+  check("an unknown upload is a 404", () => {
+    assert(missing.status === 404, `status ${missing.status}, expected 404`);
+  });
+}
+
+/**
+ * Pairing a phone as a camera.
+ *
+ * Stops at the code: pushing real frames needs a browser with a camera, and
+ * that cannot run here. What IS checked is everything a wrong code could break
+ * — that a code is issued, is findable, refuses a source the sidecar could not
+ * open, and that revoking it actually takes the camera away.
+ */
+async function deviceSuite() {
+  console.log("\ndevice pairing");
+  const db = await import("@/server/db");
+
+  const res = await fetch(`${BASE}/api/devices`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ label: "smoke device" }),
+  });
+  const body = await res.json();
+  let device: Device | null = null;
+
+  check("POST /api/devices issues a code", () => {
+    assert(res.status === 200, `status ${res.status}: ${JSON.stringify(body)}`);
+    device = conforms(Device, body, "POST /api/devices");
+    assert(device.status === "waiting", `status ${device.status}, expected waiting`);
+    assert(device.kind === null, "a fresh code must not claim a kind yet");
+    assert(/^[A-Z0-9]{4,10}$/.test(device.code), `code ${device.code} is not typeable`);
+    // Read off a screen and typed on a phone. These are the characters people
+    // get wrong, and the alphabet exists to exclude them.
+    assert(!/[O0IL1]/.test(device.code), `code ${device.code} mixes O/0 or I/L/1`);
+  });
+
+  if (device) {
+    const d = device as Device;
+    const found = await get(`/api/devices/${d.code}`);
+    check("a code is findable by the phone", () => {
+      assert(found.status === 200, `status ${found.status}`);
+      const back = conforms(Device, found.body, "device by code");
+      assert(back.camera_id === d.camera_id, "a different device came back");
+    });
+
+    // Lower case, because a phone keyboard capitalises whatever it likes.
+    const lower = await get(`/api/devices/${d.code.toLowerCase()}`);
+    check("a lower-case code still pairs", () => {
+      assert(lower.status === 200, `status ${lower.status} — codes must fold case`);
+    });
+
+    const badUrl = await fetch(`${BASE}/api/devices/${d.code}/url`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url: "/etc/passwd" }),
+    });
+    check("a source the sidecar cannot open is refused", () => {
+      assert(badUrl.status === 400, `status ${badUrl.status}, expected 400`);
+    });
+
+    const cameras = await get("/api/cameras");
+    check("a paired device IS a live camera", () => {
+      const rows = conforms(z.array(Camera), cameras.body, "/api/cameras");
+      assert(rows.some((c) => c.id === d.camera_id),
+        `${d.camera_id} is missing from the camera list — a device is a real camera`);
+    });
+
+    const revoked = await fetch(`${BASE}/api/devices/${d.id}/revoke`, { method: "POST" });
+    check("revoking a device takes the code away", async () => {
+      assert(revoked.status === 200, `status ${revoked.status}`);
+    });
+    const afterRevoke = await get(`/api/devices/${d.code}`);
+    check("a revoked code no longer pairs", () => {
+      assert(afterRevoke.status === 404,
+        `status ${afterRevoke.status} — a revoked code must stop working`);
+    });
+
+    await db.sql`DELETE FROM devices WHERE id = ${d.id}::bigint`;
+    await db.sql`DELETE FROM cameras WHERE id = ${d.camera_id}`;
+  }
+}
+
 async function uiSuite() {
   console.log("\ndashboard pages render");
 
@@ -388,6 +663,8 @@ async function uiSuite() {
     ["/map", "Journeys", "map view"],
     ["/analytics", "Scope", "analytics view"],
     ["/search", "Vehicle search", "search view"],
+    ["/upload", "Analyse a video", "upload view"],
+    ["/devices", "Add a camera", "devices view"],
     ["/status", "Argus — status", "status page"],
   ] as const) {
     const r = await page(path);
@@ -434,6 +711,8 @@ async function main() {
   await uiSuite();
   await websocketSuite();
   if (dbUp) await ackSuite();
+  if (dbUp) await uploadSuite();
+  if (dbUp) await deviceSuite();
   if (dbUp && !process.argv.includes("--no-pipeline")) await pipelineSuite();
 
   console.log(`\n${pass} passed, ${failures.length} failed`);

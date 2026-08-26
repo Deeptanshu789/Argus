@@ -7,6 +7,7 @@
  */
 import type {
   Alert, AnalyticsResponse, Camera, CameraLink, SearchResult, ServerMessage, Track, Trajectory,
+  Device, Upload, UploadResult,
 } from "@/contract";
 
 const BASE = process.env.NEXT_PUBLIC_MOCK === "1" ? "/api/mock" : "/api";
@@ -28,8 +29,62 @@ export const getTrajectories = (p: { since?: string; limit?: number } = {}) =>
   get<Trajectory[]>("/trajectories", p);
 export const search = (plate: string) => get<SearchResult>("/search", { plate });
 export const getAnalytics = (camera?: string) => get<AnalyticsResponse>("/analytics", { camera });
-export const getAlerts = (acked?: boolean) =>
-  get<Alert[]>("/alerts", { acked: acked === undefined ? undefined : String(acked) });
+export const getAlerts = (acked?: boolean, limit?: number) =>
+  get<Alert[]>("/alerts", {
+    acked: acked === undefined ? undefined : String(acked),
+    limit: limit === undefined ? undefined : String(limit),
+  });
+export const getDevices = () => get<Device[]>("/devices");
+
+export const getDeviceByCode = (code: string) =>
+  fetch(`${BASE}/devices/${encodeURIComponent(code)}`).then(async (r) => {
+    if (r.status === 404) return null;
+    if (!r.ok) throw new Error(`device lookup failed (${r.status})`);
+    return (await r.json()) as Device;
+  });
+
+const postJson = async <T>(path: string, body: unknown): Promise<T> => {
+  const r = await fetch(`${BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error((data as { error?: string }).error ?? `failed (${r.status})`);
+  return data as T;
+};
+
+export const createDevice = (label: string | null) =>
+  postJson<Device>("/devices", { label });
+
+export const pairDeviceUrl = (code: string, url: string) =>
+  postJson<Device>(`/devices/${encodeURIComponent(code)}/url`, { url });
+
+export const revokeDevice = (id: string) =>
+  postJson<{ ok: true }>(`/devices/${encodeURIComponent(id)}/revoke`, {});
+
+export const getUploads = (limit?: number) =>
+  get<Upload[]>("/uploads", { limit: limit === undefined ? undefined : String(limit) });
+
+export const getUpload = (id: string) => get<UploadResult>(`/uploads/${id}`);
+
+/**
+ * Multipart, not JSON: a video is megabytes of binary and base64 would inflate
+ * it by a third for no benefit. The browser sets its own Content-Type boundary,
+ * so this must NOT set one.
+ */
+export const createUpload = (files: File[], gapSeconds: number | null, label: string | null) => {
+  const body = new FormData();
+  for (const f of files) body.append("files", f);
+  if (gapSeconds !== null) body.append("gap_seconds", String(gapSeconds));
+  if (label) body.append("label", label);
+  return fetch(`${BASE}/uploads`, { method: "POST", body }).then(async (r) => {
+    const data = await r.json();
+    if (!r.ok) throw new Error((data as { error?: string }).error ?? `upload failed (${r.status})`);
+    return data as Upload;
+  });
+};
+
 export const ackAlert = (id: string) =>
   fetch(`${BASE}/alerts/${id}/ack`, { method: "POST" }).then((r) => r.json());
 
