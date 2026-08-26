@@ -196,7 +196,7 @@ from roboflow import Roboflow
 
 key = UserSecretsClient().get_secret("ROBOFLOW_API_KEY")
 project = Roboflow(api_key=key).workspace("quobotic").project("indian-number-plate")
-ds = project.version(1).download("yolov8", location="/kaggle/working/plates")
+ds = project.version(3).download("yolov8", location="/kaggle/working/plates")
 DATA = ds.location + "/data.yaml"
 print(DATA)
 ```
@@ -222,15 +222,15 @@ for split in ("train", "valid", "test"):
     total += len(imgs)
 
 print("total", total)
-assert total >= 1683, f"expected at least 1683 images, found {total}"
+assert total >= 2573, f"expected at least 2573 images, found {total}"
 
 cfg = yaml.safe_load(open(DATA))
 print(cfg)
 assert cfg["nc"] == 1, f"expected one class, got {cfg['nc']}: {cfg['names']}"
 ```
 
-`total` may exceed 1,683 if the version applies augmentation — that is fine and
-the assertion allows it. `total` *below* 1,683 means a split failed to
+`total` may exceed 2,573 if the version applies augmentation — that is fine and
+the assertion allows it. `total` *below* 2,573 means a split failed to
 download; re-run rather than proceeding.
 
 ### A5. Fix the paths in data.yaml
@@ -277,7 +277,7 @@ Parameters, and why (`ml/train_plate.py`, `PRESETS["gpu"]`):
 | `batch` | 32 | fits T4 16 GB at 640 |
 | `freeze` | 0 | full fine-tune. COCO has no plate class, so late layers alone are not enough |
 | `amp` | True | half precision, ~2x faster on T4, no accuracy cost here |
-| `cache` | ram | 1.7 k images at 640 fit easily; removes disk I/O from the loop |
+| `cache` | ram | 2.6 k images at 640 fit easily; removes disk I/O from the loop |
 | `patience` | 15 | stop when 15 epochs bring no improvement |
 | `epochs` | 60 | ~10 s/epoch on a T4 at this dataset size |
 
@@ -291,7 +291,7 @@ Model summary: ... 3,011,043 parameters
 If N is far below the count A4 printed, `data.yaml` is still pointing
 somewhere else. Go back to A5.
 
-`patience=15` on a 1,683-image set will often stop the run well before 60
+`patience=15` on a 2,573-image set will often stop the run well before 60
 epochs. That is the mechanism working, not a failure.
 
 ### A7. Read the score
@@ -381,7 +381,7 @@ import os
 from roboflow import Roboflow
 rf = Roboflow(api_key=os.environ["ROBOFLOW_API_KEY"])
 ds = (rf.workspace("quobotic").project("indian-number-plate")
-        .version(1).download("yolov8", location=os.path.expanduser("~/plates-in")))
+        .version(3).download("yolov8", location=os.path.expanduser("~/plates-in")))
 print("downloaded to", ds.location)
 PY
 ```
@@ -396,7 +396,7 @@ for s in train valid test; do
 done
 ```
 
-Per split the two counts must be equal, and they must add up to at least 1,683.
+Per split the two counts must be equal, and they must add up to at least 2,573.
 An image with no label file trains the model that there is no plate in it.
 
 ### B3. Fix the paths in data.yaml

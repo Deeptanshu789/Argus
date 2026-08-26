@@ -222,7 +222,7 @@ plate for fifty images is half an hour and is required before quoting a number.
 | Re-ID (OSNet) | Pretrained `osnet_x1_0`. Training it is days, payoff small. |
 | OCR (PaddleOCR) | Pretrained + `correct_plate()` in `ml/sidecar.py`. |
 
-Kaggle T4 at 1,683 images: ~10 s/epoch, so 60 epochs is ~10 min. Local `--cpu`
+Kaggle T4 at 2,573 images: ~15 s/epoch, so 60 epochs is ~15 min. Local `--cpu`
 measured 4.2 min/epoch at 8,023 images, so roughly 1 min/epoch here — about an
 hour for 60.
 
