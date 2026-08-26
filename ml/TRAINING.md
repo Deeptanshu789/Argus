@@ -11,8 +11,10 @@ merges several into one training set — see "Route C". Merged from the two
 already on this machine: **10,985 unique images**, after 411 duplicates were
 removed.
 
-Two routes: **Kaggle GPU** (recommended, ~20 min end to end) and **this
-laptop's CPU** (~1 h). Same dataset, same script, same output. Pick one.
+Three routes: **A, Kaggle GPU** (recommended, ~20 min end to end); **B, this
+laptop's CPU** (~1 h); **C, merge several datasets and fine-tune the detector
+that already works** rather than starting from COCO weights. A and B are the
+same job on different hardware. C is a different job and can run on either.
 
 Every step has a **check** immediately after it. Run the check. A training run
 that fails silently and finishes anyway is exactly how the first model ended up
