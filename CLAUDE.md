@@ -243,6 +243,15 @@ tighter model happened to produce more often. **Judge a detector by `correct`,
 never by mAP — and re-measure both sides whenever either the detector or the
 reader changes.** A stale comparison is worse than none.
 
+**Three detectors now read exactly 39 of 45**: 1,365 images at mAP 0.928, 8,023
+at 0.991, and a 9,785-image merged fine-tune at 0.982. The detector finds a
+plate in 44 of the 45 photographs, so a perfect one could add one plate. This
+test set has no resolution left to judge a detector with, and the six remaining
+failures are all the reader. The fine-tune also read one plate FEWER on the real
+video — the only test here with motion and glare in it — so the shipped weights
+stay. **Do not train another detector against `groundtruth_test50.csv`**; label
+more truth or train a reader.
+
 Full procedure, three training routes, a catalogue of further Indian plate
 datasets with licences, and the current dataset ([Quobotic Indian number plate on
 Roboflow][ds]) are in `ml/TRAINING.md`. `ml/prepare_dataset.py` takes several

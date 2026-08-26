@@ -593,6 +593,31 @@ the detectors:
 | `plate-cpu` (full retrain) | 8,023 | 0.991 | 0.08 | 39 (87%) | 2 | 4 | 95% |
 | `plate-cpu` | 8,023 | 0.991 | 0.14 | 40 (89%) | 3 | 2 | 93% |
 | `plate-cpu` | 8,023 | 0.991 | 0.20 | 39 (87%) | 3 | 3 | 93% |
+| `plate-ft` (Route C fine-tune) | 9,785 merged | 0.982 | 0.08 | 39 (87%) | 2 | 4 | 95% |
+| `plate-ft` | 9,785 merged | 0.982 | 0.14 | 39 (87%) | 2 | 4 | 95% |
+| `plate-ft` | 9,785 merged | 0.982 | 0.20 | 38 (84%) | 3 | 4 | 93% |
+
+On the real video (`ml/groundtruth_kiit.csv`, 5 legible plates, all five found
+by every model): shipped weights read **4 exactly right**, `plate-ft` **3**.
+
+### The detector is finished; this test set cannot see past it
+
+Three detectors, trained on 1,365, 8,023 and 9,785 images, spanning mAP50 0.928
+to 0.991, all read **exactly 39 of 45**. That is not a coincidence and it is not
+noise. The detector finds a plate in **44 of the 45** photographs, so the most a
+perfect detector could add is one plate. The remaining six failures are four
+misses and two wrong reads, and every one of them is the reader.
+
+Two conclusions follow, and they are the useful output of a lot of GPU time:
+
+**Stop training detectors against this file.** It has no resolution left. More
+detector work needs either footage the detector actually fails on, or a bigger
+labelled test set — item 2 under "Where the effort actually pays".
+
+**A fine-tune on more data is not free.** `plate-ft` ties on the photographs and
+loses one plate on the video, which is the only test here with motion, glare and
+distance in it. Higher mAP, same or slightly worse reading, for 78 minutes of
+CPU. Shipped weights stay.
 
 **This table used to say something different, and the difference is the lesson.**
 Under the previous reader the shipped weights scored 35 and the full retrain 33,

@@ -201,6 +201,14 @@ def emit(**event) -> None:
 # SAME observations rather than new ones -- re-running a recorded stream to test
 # idempotence, or resuming an interrupted file after a crash. Two live cameras
 # sharing a pinned id is harmless, because tracks are unique per (camera, track).
+#
+# PIN IT PER REPLAY, NEVER TO A CONSTANT. The upsert in db.ts keeps an existing
+# track's entry_time and overwrites its exit_time, which is exactly right for a
+# replay minutes apart and poisonous hours apart: the row ends up spanning the
+# gap between the first run and the last, looks recent to the association
+# window because of its exit time, and joins a trajectory whose timestamps then
+# run backwards. test/smoke.ts pinned the literal "smoke" and took eight hours
+# to fail.
 RUN_ID = os.environ.get("ARGUS_RUN_ID") or f"{int(time.time() * 1e6):x}"[-8:]
 
 

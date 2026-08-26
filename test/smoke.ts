@@ -381,6 +381,9 @@ async function ackSuite() {
  * every start and two different vehicles would otherwise share one row. A
  * replay is the one case where the events really are the same observations, so
  * it has to say so explicitly.
+ *
+ * The pin is per INVOCATION, not a constant -- see `runId` below for what a
+ * constant did.
  */
 async function pipelineSuite() {
   console.log("\nend-to-end pipeline (synthetic sidecars)");
@@ -406,13 +409,26 @@ async function pipelineSuite() {
 
   const counts = async () => ({ m: await countMatches(), t: await countTrajectories() });
 
+  /**
+   * One pin per INVOCATION, shared by the two worker runs inside it.
+   *
+   * This was the literal string "smoke", which made every invocation of the
+   * suite a replay of every previous one. The upsert keeps an existing track's
+   * entry_time and takes the new exit_time, so after a morning run and an
+   * evening run the same row claimed to have entered at 09:49 and left at
+   * 18:19. Its exit time made it look recent to the association window, it
+   * matched a fresh track by plate, and the trajectory's timestamps ran
+   * backwards -- a real contract violation, produced entirely by the test.
+   */
+  const runId = `smoke-${Date.now().toString(36)}`;
+
   const runWorker = (seconds: number) => new Promise<void>((resolve) => {
     const w = spawn("npx", ["tsx", "worker/ingest.ts"], {
       env: {
         ...process.env,
         ARGUS_PYTHON: process.env.ARGUS_PYTHON ?? "./.venv/bin/python",
         ARGUS_CAMERAS: "CAM1=demo,CAM3=demo,CAM2=demo",
-        ARGUS_RUN_ID: "smoke",
+        ARGUS_RUN_ID: runId,
       },
       stdio: ["ignore", "pipe", "pipe"],
     });

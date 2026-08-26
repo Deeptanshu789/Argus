@@ -24,8 +24,20 @@
  *              before it did are still stored, and they put cameras the
  *              operator never uploaded on their results page.
  *
- * Deletes trajectories only. Tracks, detections and matches are untouched: the
- * underlying observations are real, it is only the stitching that was wrong.
+ * Deletes trajectories, and the small number of TRACKS that are themselves
+ * impossible. Detections are untouched: an observation is real even when the
+ * track it was filed under is not.
+ *
+ * An impossible track is one whose exit time is more than an hour after its
+ * entry. A track closes after MISS_LIMIT frames without a sighting -- two
+ * seconds at 5 fps -- so no genuine track lasts minutes, let alone hours. One
+ * arises when two runs share a pinned ARGUS_RUN_ID hours apart: the upsert
+ * keeps the first run's entry_time and takes the last run's exit_time, and the
+ * row spans the gap between them. Its recent exit time then makes it look live
+ * to the association window, it matches a fresh vehicle by plate, and the
+ * trajectory built from it has timestamps running backwards. Deleting the bad
+ * trajectory alone does not help: the poisoned track is still there to build
+ * another one.
  */
 import { sql } from "@/server/db";
 
@@ -57,17 +69,50 @@ const bad = await sql<{ id: string; reason: string; detail: string }[]>`
    WHERE n <> distinct_n OR backwards OR mixed
    ORDER BY id`;
 
+/** A single tracked vehicle cannot be in one camera's view for an hour. */
+const impossible = await sql<
+  { id: string; camera_id: string; track_id: string; hours: number }[]
+>`
+  SELECT id, camera_id, track_id,
+         EXTRACT(EPOCH FROM (exit_time - entry_time)) / 3600 AS hours
+    FROM tracks
+   WHERE exit_time IS NOT NULL
+     AND exit_time - entry_time > INTERVAL '1 hour'
+   ORDER BY id`;
+
 if (bad.length === 0) {
   console.log("no invalid trajectories");
 } else {
   for (const t of bad) console.log(`  ${t.reason.padEnd(9)} trajectory ${t.id}: [${t.detail}]`);
-  if (apply) {
-    const ids = bad.map((t) => t.id);
-    await sql`DELETE FROM trajectories WHERE id = ANY(${ids}::bigint[])`;
-    console.log(`\ndeleted ${bad.length}`);
-  } else {
-    console.log(`\n${bad.length} invalid. Re-run with --apply to delete them.`);
+}
+
+for (const t of impossible) {
+  console.log(`  IMPOSSIBLE track ${t.id}: ${t.camera_id}/${t.track_id} ` +
+              `spans ${Number(t.hours).toFixed(1)} h`);
+}
+
+const total = bad.length + impossible.length;
+if (total === 0) {
+  console.log("nothing to repair");
+} else if (apply) {
+  if (bad.length) {
+    await sql`DELETE FROM trajectories WHERE id = ANY(${bad.map((t) => t.id)}::bigint[])`;
   }
+  if (impossible.length) {
+    const ids = impossible.map((t) => t.id);
+    // Anything stitched FROM a poisoned track is poisoned too, whether or not
+    // its own ordering happened to come out valid.
+    await sql`DELETE FROM trajectories
+               WHERE track_ids && ${ids}::bigint[]`;
+    // matches has a foreign key onto tracks, so it goes first.
+    await sql`DELETE FROM matches
+               WHERE from_track = ANY(${ids}::bigint[])
+                  OR to_track   = ANY(${ids}::bigint[])`;
+    await sql`DELETE FROM tracks WHERE id = ANY(${ids}::bigint[])`;
+  }
+  console.log(`\ndeleted ${bad.length} trajectory(ies) and ${impossible.length} track(s)`);
+} else {
+  console.log(`\n${total} invalid. Re-run with --apply to delete them.`);
 }
 
 await sql.end();
