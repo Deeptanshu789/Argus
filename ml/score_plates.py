@@ -48,7 +48,16 @@ def main() -> None:
     ap.add_argument("--model", default=None)
     ap.add_argument("--conf", type=float, default=0.25)
     ap.add_argument("--show", action="store_true", help="list every mismatch")
+    ap.add_argument("--pad", type=float, default=None,
+                    help="crop padding as a fraction of box size; default is the "
+                         "sidecar's PLATE_PAD. A detector that draws tighter boxes "
+                         "needs more padding, so this is worth re-measuring after "
+                         "every retrain.")
     args = ap.parse_args()
+
+    if args.pad is not None:
+        import sidecar
+        sidecar.PLATE_PAD = args.pad
 
     weights = args.model or find_plate_weights()
     if weights is None:

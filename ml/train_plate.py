@@ -21,6 +21,7 @@ Use --cpu only if Kaggle is unavailable. It is 15-25x slower for the same job.
 import argparse
 import sys
 import time
+from pathlib import Path
 
 # (imgsz, batch, workers, freeze, amp, cache)
 PRESETS = {
@@ -57,13 +58,21 @@ def main() -> None:
 
     from ultralytics import YOLO
 
+    # ABSOLUTE, deliberately. Ultralytics resolves a relative `project` against
+    # its own runs directory, not the working directory, so `runs/detect` became
+    # `runs/detect/runs/detect/<name>` and the weights landed somewhere nothing
+    # looks for them -- including find_plate_weights() in ml/sidecar.py.
+    project = Path(args.project).resolve()
+    data = str(Path(args.data).expanduser().resolve())
+
+    model = YOLO(args.model)
     t0 = time.time()
-    YOLO(args.model).train(
-        data=args.data,
+    model.train(
+        data=data,
         epochs=args.epochs,
         patience=args.patience,
         device=device,
-        project=args.project,
+        project=str(project),
         name=args.name,
         resume=args.resume,
         exist_ok=True,
@@ -71,8 +80,18 @@ def main() -> None:
     )
     mins = (time.time() - t0) / 60
     per = mins / max(args.epochs, 1)
+
+    # Report where the weights REALLY are. The trainer knows; guessing from the
+    # arguments is what hid the last run's output.
+    save_dir = Path(getattr(model.trainer, "save_dir", project / args.name))
+    best = save_dir / "weights" / "best.pt"
     print(f"\n{args.epochs} epoch(s) in {mins:.1f} min -> {per:.1f} min/epoch")
-    print(f"weights: {args.project}/{args.name}/weights/best.pt")
+    print(f"weights: {best}")
+    if not best.exists():
+        print(f"WARNING: {best} does not exist -- training wrote nothing there.")
+    elif save_dir.resolve() != (project / args.name).resolve():
+        print(f"WARNING: expected {project / args.name}, got {save_dir}. "
+              f"Move the weights before the sidecar can find them.")
 
     if args.cpu and args.epochs == 1:
         # Calibration guidance only matters on the slow path.

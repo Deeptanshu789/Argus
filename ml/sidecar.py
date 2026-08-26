@@ -38,6 +38,7 @@ clears on 16 Zen 5 threads. Per-frame OCR or Re-ID does not.
 """
 import argparse
 import json
+import os
 import sys
 import time
 from datetime import datetime, timezone
@@ -77,6 +78,26 @@ def emit(**event) -> None:
     json.dump(event, _PROTOCOL, separators=(",", ":"))
     _PROTOCOL.write("\n")
     _PROTOCOL.flush()
+
+
+# Unique per sidecar PROCESS, and prefixed onto every track id.
+#
+# The tracker numbers tracks from 1 on every start, so a restarted sidecar
+# re-issues 1, 2, 3 for entirely different vehicles. `tracks` is keyed
+# UNIQUE (camera_id, track_id), so the upsert in worker/ingest.ts merged the old
+# vehicle and the new one into a single row: one database id, two sets of entry
+# and exit times. Trajectories then formed cycles that visited the same track
+# twice and carried timestamps that ran backwards.
+#
+# ponytail: process start time to the microsecond, hex, last 8 digits. Two
+# sidecars for one camera cannot start in the same microsecond, and the id stays
+# short enough to read in a log.
+#
+# ARGUS_RUN_ID pins it. Set it only when a replay is meant to be treated as the
+# SAME observations rather than new ones -- re-running a recorded stream to test
+# idempotence, or resuming an interrupted file after a crash. Two live cameras
+# sharing a pinned id is harmless, because tracks are unique per (camera, track).
+RUN_ID = os.environ.get("ARGUS_RUN_ID") or f"{int(time.time() * 1e6):x}"[-8:]
 
 
 def now_iso() -> str:
@@ -222,11 +243,11 @@ def demo(camera: str, fps: int) -> None:
     exit_ = datetime.fromtimestamp(base + 8, timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
     for i in range(fps):
-        emit(event="detection", camera_id=camera, track_id="T0001", ts=entry,
+        emit(event="detection", camera_id=camera, track_id=f"{RUN_ID}-1", ts=entry,
              bbox=[400 + i * 12, 220, 560 + i * 12, 340], conf=0.93, vehicle_type="car")
         time.sleep(1.0 / max(fps, 1))
 
-    emit(event="track_closed", camera_id=camera, track_id="T0001",
+    emit(event="track_closed", camera_id=camera, track_id=f"{RUN_ID}-1",
          entry_time=entry, exit_time=exit_, vehicle_type="car", color="white",
          # Third leg has an unreadable plate on purpose: it forces the match to
          # come from layers 2+3, which is exactly what Act 2 of the demo shows.
@@ -520,6 +541,13 @@ def run(camera: str, source: str, fps: int, loop: bool = False) -> None:
     print(f"source {src_fps:.0f} fps, processing every {step} frame(s) "
           f"-> {src_fps / step:.1f} fps", file=sys.stderr)
 
+    # "ready" means THE SOURCE IS OPEN, and is emitted here rather than at
+    # startup for that reason. The supervisor treats it as proof that a paired
+    # phone is really serving video: emitted before this line it would arrive
+    # even when the stream could not be opened at all, and a device whose app
+    # had been closed would report itself healthy forever.
+    emit(event="ready", camera_id=camera, fps=fps)
+
     tracks: dict[str, _Track] = {}
     features: dict[str, list[float]] = {}
     processed = 0
@@ -588,7 +616,8 @@ def run(camera: str, source: str, fps: int, loop: bool = False) -> None:
         for strack in getattr(tracker, "tracked_stracks", []):
             feat = getattr(strack, "smooth_feat", None)
             if feat is not None:
-                features[str(int(strack.track_id))] = [round(float(v), 6) for v in feat]
+                features[f"{RUN_ID}-{int(strack.track_id)}"] = [
+                    round(float(v), 6) for v in feat]
 
         seen: set[str] = set()
         boxes = result.boxes
@@ -608,7 +637,7 @@ def run(camera: str, source: str, fps: int, loop: bool = False) -> None:
                   file=sys.stderr)
         if boxes is not None and boxes.id is not None:
             for box in boxes:
-                key = str(int(box.id[0]))
+                key = f"{RUN_ID}-{int(box.id[0])}"
                 seen.add(key)
                 x1, y1, x2, y2 = (int(v) for v in box.xyxy[0])
                 kind = VEHICLE_CLASSES.get(int(box.cls[0]), "car")
@@ -667,9 +696,9 @@ def main() -> None:
     if args.selfcheck:
         return _selfcheck()
 
-    emit(event="ready", camera_id=args.camera, fps=args.fps)
     try:
         if args.source == "demo":
+            emit(event="ready", camera_id=args.camera, fps=args.fps)
             return demo(args.camera, args.fps)
         run(args.camera, args.source, args.fps, loop=args.loop)
     except SystemExit:
