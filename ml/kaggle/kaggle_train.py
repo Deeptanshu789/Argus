@@ -39,7 +39,12 @@ from pathlib import Path
 
 IN = Path("/kaggle/input")
 OUT = Path("/kaggle/working")
-REPO = OUT / "Argus"
+# SCRATCH IS NOT OUTPUT. Everything under /kaggle/working is published as the
+# kernel's output and has to be downloaded again to read a log; the clone and
+# the merged detection set are both scratch, and putting them there once cost
+# a 1.4 GB download to find one error message.
+SCRATCH = Path("/tmp/argus")
+REPO = SCRATCH / "repo"
 
 # Detector size. YOLO11s is ~9M parameters against YOLOv8n's ~3M. The shipped
 # laptop pipeline runs an OpenVINO export at 480px, and s still clears the
@@ -103,14 +108,24 @@ def build_detection_set() -> Path:
     and drops repeated photographs by perceptual hash first. Public plate sets
     are largely re-uploads of each other, and the same image in train and val
     inflates val mAP silently."""
-    dst = OUT / "det"
+    dst = SCRATCH / "det"
     if (dst / "data.yaml").exists():
         return dst
-    srcs = [d for d in (find_input("indian-license-plates-with-labels", "kedarsai"),
-                        find_input("indian-vehicle", "saisirishan"),
-                        find_input("indian-number-plate-images", "tkm"),
-                        find_input("large-license-plate", "fareselmenshawii"),
-                        find_input("car-plate-detection", "andrewmvd")) if d]
+    wanted = [find_input("kedarsai"), find_input("saisirishan"),
+              find_input("tkm22092"), find_input("fareselmenshawii"),
+              find_input("andrewmvd"), find_input("dataclusterlabs")]
+    # A SOURCE WITH NO ANNOTATIONS ABORTS THE WHOLE MERGE, so drop those here
+    # rather than letting one unlabelled set cost the run. Several published
+    # "vehicle" sets are photographs only -- useful to a captioning model, not
+    # to a detector, and there is nothing to convert.
+    srcs = []
+    for d in wanted:
+        if d is None:
+            continue
+        if not any(d.rglob(f"*{ext}") for ext in (".txt", ".json", ".xml")):
+            print(f"skipping {d.name}: no annotations, nothing to convert")
+            continue
+        srcs.append(d)
     if not srcs:
         sys.exit("no detection inputs attached")
     print("detection sources:", *[s.name for s in srcs], sep="\n  ")

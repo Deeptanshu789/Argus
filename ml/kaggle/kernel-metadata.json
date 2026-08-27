@@ -14,7 +14,12 @@
     "tkm22092/indian-number-plate-images",
     "abtexp/synthetic-indian-license-plates",
     "raspberrypi5/indian-commercial-vehicle-number-plate",
-    "fareselmenshawii/large-license-plate-dataset"
+    "fareselmenshawii/large-license-plate-dataset",
+    "dataclusterlabs/indian-number-plates-dataset",
+    "dataclusterlabs/indian-vehicle-dataset",
+    "dataclusterlabs/electric-vehicle-number-plate-image-dataset",
+    "dataclusterlabs/autorickshaw-image-dataset-niche-vehicle-dataset",
+    "dataclusterlabs/vehicle-image-captioning-dataset"
   ],
   "competition_sources": [],
   "kernel_sources": []
