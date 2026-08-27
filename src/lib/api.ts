@@ -68,6 +68,10 @@ export const getUploads = (limit?: number) =>
 
 export const getUpload = (id: string) => get<UploadResult>(`/uploads/${id}`);
 
+/** Stop scanning an upload. Whatever was already read is kept. */
+export const cancelUpload = (id: string) =>
+  postJson<Upload>(`/uploads/${encodeURIComponent(id)}/cancel`, {});
+
 /**
  * Multipart, not JSON: a video is megabytes of binary and base64 would inflate
  * it by a third for no benefit. The browser sets its own Content-Type boundary,

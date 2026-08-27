@@ -404,6 +404,9 @@ const lastSpike = new Map<string, string>();
 
 // ---------------------------------------------------------------- uploads --
 
+/** How often a running upload is checked for a cancel request. */
+const CANCEL_POLL_MS = 2000;
+
 /** How often the worker looks for a video the operator has uploaded. */
 const UPLOAD_POLL_MS = 3000;
 
@@ -436,6 +439,19 @@ async function runUpload(upload: Awaited<ReturnType<typeof db.claimPendingUpload
   const failures: string[] = [];
   const sources = await db.uploadSourcePaths(upload.id);
 
+  // The operator can stop a scan from the results page, and the sidecars are
+  // OUR children -- the web process cannot reach them, so it writes the
+  // decision to the database and this poll is what acts on it.
+  let cancelled = false;
+  const watchCancel = setInterval(() => {
+    void db.uploadCancelled(upload.id).then((yes) => {
+      if (!yes || cancelled) return;
+      cancelled = true;
+      console.log(`[upload ${upload.id}] cancelled — stopping ${sources.length} sidecar(s)`);
+      for (const src of sources) children.get(src.camera_id)?.kill();
+    }).catch(() => {});
+  }, CANCEL_POLL_MS);
+
   // Started together, and NOT shifted in time. Two cameras at a junction record
   // over the same period, so decoding their files together already reproduces
   // the real interval between sightings: a vehicle a minute apart in the footage
@@ -450,11 +466,14 @@ async function runUpload(upload: Awaited<ReturnType<typeof db.claimPendingUpload
     console.log(`[upload ${upload.id}] ${src.camera_id} <- ${src.filename}`);
     const proc = start({ id: src.camera_id, source: src.path }, {
       onExit: (code) => {
+        // A killed sidecar exits non-zero. That is the operator's doing, not a
+        // failure, so it must not be reported as one.
         const okExit = code === 0;
-        if (!okExit) failures.push(`${src.filename} (exit ${code})`);
+        if (!okExit && !cancelled) failures.push(`${src.filename} (exit ${code})`);
         void db.setUploadSourceStatus(
-          src.camera_id, okExit ? "done" : "error",
-          okExit ? null : `sidecar exited with ${code}`,
+          src.camera_id,
+          cancelled ? "cancelled" : okExit ? "done" : "error",
+          okExit || cancelled ? null : `sidecar exited with ${code}`,
         ).catch(() => {});
         resolve();
       },
@@ -466,12 +485,19 @@ async function runUpload(upload: Awaited<ReturnType<typeof db.claimPendingUpload
   // "done" while its own rows are unwritten looks empty on the results page.
   await flush();
 
-  await db.setUploadStatus(
-    upload.id,
-    failures.length ? "error" : "done",
-    failures.length ? failures.join("; ") : null,
-  );
-  console.log(`[upload ${upload.id}] ${failures.length ? "FAILED" : "done"}`);
+  clearInterval(watchCancel);
+
+  // A cancelled upload keeps the status the operator set. Writing "done" over
+  // it would claim the whole video was scanned when it was stopped part way.
+  if (!cancelled) {
+    await db.setUploadStatus(
+      upload.id,
+      failures.length ? "error" : "done",
+      failures.length ? failures.join("; ") : null,
+    );
+  }
+  console.log(`[upload ${upload.id}] ` +
+              (cancelled ? "cancelled" : failures.length ? "FAILED" : "done"));
 }
 
 async function pollUploads() {

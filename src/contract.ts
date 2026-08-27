@@ -123,7 +123,10 @@ export const Alert = z.object({
 // uploaded footage — only the results page needs to know which cameras belong
 // to which upload.
 
-export const UploadStatus = z.enum(["pending", "running", "done", "error"]);
+// "cancelled" is an operator decision, not a failure: the sidecars were killed
+// on request and whatever they had already written is kept. It is distinct from
+// "error" so the results page can say which one happened.
+export const UploadStatus = z.enum(["pending", "running", "done", "error", "cancelled"]);
 
 export const UploadSource = z.object({
   camera_id: z.string(),

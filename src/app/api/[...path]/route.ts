@@ -236,6 +236,22 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ path: stri
     }
   }
 
+  // uploads/<id>/cancel — stop scanning a video the operator no longer wants.
+  // The sidecars belong to the worker, so this only records the decision; the
+  // worker is what kills them.
+  if (path[0] === "uploads" && path[2] === "cancel" && path[1] && path.length === 3) {
+    try {
+      const stopped = await db.cancelUpload(path[1]);
+      if (!stopped) {
+        return NextResponse.json({ error: "upload is not running" }, { status: 409 });
+      }
+      const upload = await db.getUpload(path[1]);
+      return ok(Upload, upload, route);
+    } catch (err) {
+      return down(route, err);
+    }
+  }
+
   if (path[0] === "alerts" && path[2] === "ack" && path[1]) {
     try {
       const alert = await db.ackAlert(path[1]);

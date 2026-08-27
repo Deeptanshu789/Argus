@@ -566,6 +566,32 @@ export async function setUploadStatus(
              WHERE id = ${id}::bigint`;
 }
 
+/**
+ * Stop an upload the operator no longer wants scanned.
+ *
+ * The web process cannot kill the sidecars -- they are children of the WORKER,
+ * which is a separate process by design. So cancelling is a flag in the
+ * database and the worker acts on it; `false` here means the upload had already
+ * finished and there was nothing left to stop.
+ */
+export async function cancelUpload(id: string): Promise<boolean> {
+  const rows = await sql<{ id: string }[]>`
+    UPDATE uploads SET status = 'cancelled'
+     WHERE id = ${id}::bigint AND status IN ('pending', 'running')
+    RETURNING id`;
+  if (!rows.length) return false;
+  await sql`UPDATE upload_sources SET status = 'cancelled'
+             WHERE upload_id = ${id}::bigint AND status IN ('pending', 'running')`;
+  return true;
+}
+
+/** What the worker polls while an upload runs, to notice a cancel request. */
+export async function uploadCancelled(id: string): Promise<boolean> {
+  const rows = await sql<{ status: string }[]>`
+    SELECT status FROM uploads WHERE id = ${id}::bigint`;
+  return rows[0]?.status === "cancelled";
+}
+
 export async function setUploadSourceStatus(
   cameraId: string, status: Upload["status"], error: string | null = null,
 ): Promise<void> {

@@ -7,9 +7,9 @@
  * here so much as never asked for — this page reads a single upload, so the
  * question of what else is in the database does not arise.
  */
-import { use } from "react";
+import { use, useState } from "react";
 import Link from "next/link";
-import { getUpload } from "@/lib/api";
+import { cancelUpload, getUpload } from "@/lib/api";
 import { Empty, Panel, T, Tag, ago, methodColour } from "@/components/ui";
 import { usePoll } from "@/components/useLive";
 import type { Upload } from "@/contract";
@@ -17,8 +17,13 @@ import type { Upload } from "@/contract";
 const statusColour = (s: Upload["status"]) =>
   s === "done" ? T.ok : s === "error" ? T.bad : s === "running" ? T.warn : T.dim;
 
+/** Only these two have anything left to stop. */
+const stoppable = (s: Upload["status"]) => s === "running" || s === "pending";
+
 export default function UploadResultView({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
+  const [stopping, setStopping] = useState(false);
+  const [stopError, setStopError] = useState<string | null>(null);
   // Polls while the worker is still decoding, so plates appear as they are read
   // rather than all at once at the end.
   const result = usePoll(() => getUpload(id), 3000);
@@ -45,7 +50,35 @@ export default function UploadResultView({ params }: { params: Promise<{ id: str
           {upload.gap_seconds !== null && (
             <Tag colour={T.ok}>{upload.gap_seconds}s between cameras</Tag>
           )}
+          {stoppable(upload.status) && (
+            <button
+              disabled={stopping}
+              onClick={() => {
+                setStopping(true);
+                setStopError(null);
+                cancelUpload(id)
+                  .catch((e: Error) => setStopError(e.message))
+                  .finally(() => setStopping(false));
+              }}
+              style={{
+                background: "transparent", border: `1px solid ${T.line}`,
+                color: stopping ? T.dim : T.bad, borderRadius: 4, fontSize: 11,
+                padding: "2px 9px", cursor: stopping ? "default" : "pointer",
+                marginLeft: "auto",
+              }}
+            >{stopping ? "stopping…" : "stop scanning"}</button>
+          )}
         </div>
+
+        {stopError && (
+          <p style={{ color: T.bad, fontSize: 12, marginBottom: ".8rem" }}>{stopError}</p>
+        )}
+
+        {upload.status === "cancelled" && (
+          <p style={{ color: T.dim, fontSize: 12, marginBottom: ".8rem" }}>
+            Stopped by an operator. Everything read before then is below.
+          </p>
+        )}
 
         {upload.error && (
           <p style={{ color: T.bad, fontSize: 12, marginBottom: ".8rem" }}>{upload.error}</p>
