@@ -288,12 +288,14 @@ with CTC loss to replace PaddleOCR: 2.11M parameters, 32x256 grayscale input,
 37 classes. Small on purpose — it trains on this laptop's CPU and runs in
 milliseconds against PaddleOCR's 163 ms.
 
-`ARGUS_READER=<checkpoint>` switches the sidecar to it. **Opt-in by path, never
-by the file merely existing**: every measurement in this document was taken with
-PaddleOCR, and a reader that has not been scored against
-`ml/groundtruth_test50.csv` must not be able to replace it by turning up on
-disk. `make_reader()` remains the single construction site and falls back to
-PaddleOCR if the checkpoint will not load.
+`ARGUS_READER=<checkpoint>` switches the sidecar to it, and `ARGUS_PLATE_MODEL`
+does the same for the detector. **Opt-in by path, never by the file merely
+existing**: a reader that has not been scored against `ml/groundtruth_test50.csv`
+must not be able to replace the one in service by turning up on disk. Changing
+the default is an edit to `READER_WEIGHTS` in `ml/sidecar.py`, made once the
+score exists. `make_reader()` remains the single construction site and falls
+back to PaddleOCR if the checkpoint will not load. `ARGUS_READER=paddle` forces
+that fallback.
 
 ### Two-line plates are split and laid side by side
 
@@ -321,15 +323,45 @@ these can.
 
 | reader | correct of 45 | CER | precision |
 |---|---|---|---|
-| PaddleOCR (shipped) | **39 (87%)** | 9.4% | 95% |
+| PaddleOCR | **39 (87%)** | 9.4% | 95% |
 | CRNN, synthetic only | 0 (0%) | 82.6% | 0% |
 | CRNN, +1,756 real crops, 8 epochs | 16 (36%) | 34.9% | 42% |
+| CRNN, 35 epochs local, 78,650 samples | 18 (40%) | 31.3% | 42% |
+| CRNN, 60 epochs Kaggle, 178,266 samples (`runs/reader-k12`) | 25 (56%) | — | 60% |
 
 Eight epochs on under two thousand crops moved it from nothing to a third, and
 the remaining errors became near-misses (`ML10B9306` -> `ML10B9308`). The
 binding constraint is the amount of real data, not the architecture: 1,756
 crops, 736 unique plates, 49% Maharashtra. Video is the only plentiful source —
 `--video` runs the sidecar's own vehicle-then-plate stages over traffic footage.
+
+### The Kaggle reader is in service, and it never abstains
+
+`ml/kaggle/kaggle_train.py` trains both models on a Kaggle T4 in one session:
+YOLO11s over 27,009 merged images, then the CRNN over 178,266 samples of which
+73% are real Indian crops. Held out the reader scores **93.4% exact at 2.50%
+CER** — the numbers asked for, and they are honest about that split.
+
+They do not survive contact with the 45 photographs, where it reads 25. The
+whole of the gap is one behaviour: **it answers every crop it is given.** On the
+KIIT clip it returns text for 93 of 93 crops against PaddleOCR's 86, and the
+reads that match no legible plate go from 9 to 71 — overwhelmingly `MH01`,
+`MH02`, `MH04`, because 49% of the training crops are Maharashtra and an
+unreadable crop makes it emit its prior. Exactly-right on that clip falls 4/5
+to 2/5.
+
+A CTC model has no abstention: softmax over 37 classes always has an argmax, and
+`correct_plate()` cannot reject the output because the invented plates are
+grammatical Indian registrations. PaddleOCR abstains because its detector finds
+no text line at all. **That, not CER, is what a reader has to be judged on** —
+a confident wrong plate is worse for ANPR than no plate, and the held-out split
+cannot see the difference because every crop in it has a true label.
+
+`runs/reader-k12` and `runs/detect/plate-k12` are the defaults in
+`ml/sidecar.py`. `ARGUS_READER=paddle` puts the 39/45 reader back in one
+command, and the YOLOv8n weights stay at `runs/detect/plate` for
+`ARGUS_PLATE_MODEL`. The next gain is a confidence floor on the CTC path, not
+another epoch.
 
 **Never train the reader on `~/indian-plates/test` or on the KIIT clip.** They
 are what `groundtruth_test50.csv` and `groundtruth_kiit.csv` score against, and
@@ -451,7 +483,14 @@ python ml/diagnose_video.py --source clip.mp4 --truth ml/groundtruth_kiit.csv
 python ml/prepare_dataset.py --src A B C --dst datasets/plates-merged  # merge datasets
 python ml/make_demo_clips.py                # synthetic demo/cam*.mp4 test clips
 python ml/train_plate.py --epochs 50        # on Kaggle
-python ml/export_onnx.py --weights runs/detect/plate/weights/best.pt
+python ml/export_onnx.py --weights runs/detect/plate/weights/best.pt --fp32
+
+kaggle kernels push -p ml/kaggle            # BOTH models on one T4 session
+kaggle kernels status deeptanshu789/argus-plate-detector-and-reader
+kaggle kernels output deeptanshu789/argus-plate-detector-and-reader -p runs/kaggle
+
+ARGUS_READER=paddle npm run worker          # the 39/45 reader, one command back
+ARGUS_PLATE_MODEL=runs/detect/plate/weights/best_openvino_model npm run worker
 ```
 
 Real video end to end, no Kaggle needed (uses the exported weights if present):
@@ -559,7 +598,8 @@ OCR silently reads nothing forever.
 | `ml/sidecar.py` | Done — `run()` is the real decode/track/OCR/ReID loop |
 | `ml/bench.py`, `ml/diagnose_video.py` | Per-stage timings, per-stage plate losses |
 | `test/smoke.ts` | 38 checks incl. a live end-to-end pipeline run |
-| Trained plate weights | Done — 39/45 plates read correctly (87%) |
+| Trained plate weights | Done — YOLO11s `plate-k12`, mAP50 0.974, 38/45 with PaddleOCR |
+| Trained reader weights | In service — CRNN `reader-k12`, 25/45, precision 60% |
 | `src/app/(dashboard)` | Done — live, map, analytics, search, upload, devices |
 | Real traffic footage | Upload it at `/upload` — no code change needed |
 

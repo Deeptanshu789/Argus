@@ -447,7 +447,14 @@ def demo(camera: str, fps: int) -> None:
 # The plate detector is a different case and IS exported: nothing tracks with
 # it, so only its detection speed matters.
 VEHICLE_WEIGHTS = "yolov8n.pt"
+# plate-k12 first: YOLO11s, trained on Kaggle over 27,009 images to mAP50
+# 0.974. Against the 45 hand-labelled photographs it reads 38 correct to the
+# older YOLOv8n's 39 -- one plate, which is a tie on a set this size. It is the
+# default because it is the model in service; the v8n weights stay on disk under
+# runs/detect/plate and ARGUS_PLATE_MODEL puts either one back in one command.
 PLATE_CANDIDATES = (
+    "runs/detect/plate-k12/weights/best_openvino_model",
+    "runs/detect/plate-k12/weights/best.pt",
     "runs/detect/plate/weights/best_openvino_model",
     "runs/detect/plate/weights/best.pt",
 )
@@ -763,14 +770,25 @@ def apply_thread_limit() -> None:
         pass
 
 
-# The trained plate reader from ml/train_reader.py, when one is wanted.
+# The trained plate reader from ml/train_reader.py.
 #
-# OPT-IN BY PATH, not by the file merely existing. PaddleOCR is what every
-# measurement in CLAUDE.md was taken with, and a reader that has not been scored
-# against ml/groundtruth_test50.csv must not be able to replace it by turning up
-# on disk. Point ARGUS_READER at the weights, measure, and only then change this
-# default.
-READER_WEIGHTS = os.environ.get("ARGUS_READER") or None
+# STILL OPT-IN BY PATH, not by the file merely existing: a reader that has not
+# been scored against ml/groundtruth_test50.csv must never be able to replace
+# the one in service by turning up on disk. Changing this default is therefore
+# an edit here, made once the score exists, and never a copy into a directory.
+#
+# runs/reader-k12 is the Kaggle CRNN: 60 epochs over 178,266 samples, 73% of
+# them real Indian crops. Held out it reads 93.4% exactly at 2.50% CER. On the
+# 45 photographs it reads 25 correct to PaddleOCR's 39, and its precision is
+# 60% against PaddleOCR's 95% -- it answers on every crop it is given, including
+# crops no reader could resolve, where it emits its training prior (49% of those
+# crops are Maharashtra, so the invented plates are overwhelmingly MH). That is
+# the tradeoff this default takes: more reads, and a lower share of them true.
+# Unset it, or set ARGUS_READER=paddle, to put PaddleOCR back.
+_READER_DEFAULT = "runs/reader-k12/best.pt"
+READER_WEIGHTS = os.environ.get("ARGUS_READER", _READER_DEFAULT) or None
+if READER_WEIGHTS == "paddle" or not os.path.exists(READER_WEIGHTS or ""):
+    READER_WEIGHTS = None
 
 
 class CrnnReader:
