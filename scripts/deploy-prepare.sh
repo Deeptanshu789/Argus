@@ -121,8 +121,12 @@ else
   weights_ok=0
 fi
 
-if [ -f runs/reader-k12/best.pt ]; then
-  echo "runs/reader-k12/best.pt present"
+# Read the path out of ml/sidecar.py rather than repeating it here. This
+# default has already moved once between trained readers, and a copy of it in
+# this script would go on reporting a healthy deploy for the wrong file.
+READER=$(sed -n 's/^_READER_DEFAULT = "\(.*\)"$/\1/p' ml/sidecar.py)
+if [ -f "$READER" ]; then
+  echo "$READER present"
 else
   echo "  NOTE: no trained reader; the sidecar will fall back to PaddleOCR."
   echo "  That is the higher-precision reader, so this is safe -- but it is"
@@ -136,7 +140,7 @@ if [ "$weights_ok" = 0 ]; then
   echo "  Copy them up from the build machine:"
   echo
   echo "      rsync -av runs/detect/plate-k12/ USER@THIS_HOST:$(pwd)/runs/detect/plate-k12/"
-  echo "      rsync -av runs/reader-k12/      USER@THIS_HOST:$(pwd)/runs/reader-k12/"
+  echo "      rsync -av $(dirname "$READER")/ USER@THIS_HOST:$(pwd)/$(dirname "$READER")/"
 fi
 
 # ---------------------------------------------------------------------------

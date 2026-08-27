@@ -777,15 +777,22 @@ def apply_thread_limit() -> None:
 # the one in service by turning up on disk. Changing this default is therefore
 # an edit here, made once the score exists, and never a copy into a directory.
 #
-# runs/reader-k12 is the Kaggle CRNN: 60 epochs over 178,266 samples, 73% of
-# them real Indian crops. Held out it reads 93.4% exactly at 2.50% CER. On the
-# 45 photographs it reads 25 correct to PaddleOCR's 39, and its precision is
-# 60% against PaddleOCR's 95% -- it answers on every crop it is given, including
-# crops no reader could resolve, where it emits its training prior (49% of those
-# crops are Maharashtra, so the invented plates are overwhelmingly MH). That is
-# the tradeoff this default takes: more reads, and a lower share of them true.
-# Unset it, or set ARGUS_READER=paddle, to put PaddleOCR back.
-_READER_DEFAULT = "runs/reader-k12/best.pt"
+# Three trained readers exist and any of them can take this default. All three
+# lose to PaddleOCR on the 45 photographs, and for the same reason: a CTC
+# softmax over 37 classes always has an argmax, so none of them can decline to
+# answer a crop, and correct_plate() cannot reject the result because what they
+# invent is grammatical. The choice between them is a choice of how much to
+# read against how much of it to trust.
+#
+#   runs/reader-ft/best.pt    2.11M params, 35 epochs local, 76,150 samples
+#   runs/reader-k12/best.pt   3.17M params, 60 epochs Kaggle, 178,266 samples
+#   PaddleOCR                 ARGUS_READER=paddle; 39/45, precision 95%
+#
+# reader-ft is the default because it is the one being tested against the
+# YOLO11s detector. Measurements for the pair live in CLAUDE.md; re-measure
+# BOTH sides whenever either changes, because a detector that crops differently
+# changes what the reader sees.
+_READER_DEFAULT = "runs/reader-ft/best.pt"
 READER_WEIGHTS = os.environ.get("ARGUS_READER", _READER_DEFAULT) or None
 if READER_WEIGHTS == "paddle" or not os.path.exists(READER_WEIGHTS or ""):
     READER_WEIGHTS = None

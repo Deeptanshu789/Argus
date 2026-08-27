@@ -326,8 +326,24 @@ these can.
 | PaddleOCR | **39 (87%)** | 9.4% | 95% |
 | CRNN, synthetic only | 0 (0%) | 82.6% | 0% |
 | CRNN, +1,756 real crops, 8 epochs | 16 (36%) | 34.9% | 42% |
-| CRNN, 35 epochs local, 78,650 samples | 18 (40%) | 31.3% | 42% |
+| CRNN, 35 epochs local, 76,150 samples (`runs/reader-ft`) | 18 (40%) | 31.3% | 42% |
 | CRNN, 60 epochs Kaggle, 178,266 samples (`runs/reader-k12`) | 25 (56%) | — | 60% |
+
+Re-measured against the YOLO11s detector, which finds 65% more plate boxes and
+so hands every reader more crops — including more crops too poor to read:
+
+| reader, with `plate-k12` | correct of 45 | precision | KIIT exact | KIIT spurious |
+|---|---|---|---|---|
+| PaddleOCR | **38 (84%)** | **95%** | **4/5** | **6** |
+| `reader-k12` best | 25 (56%) | 60% | 1/5 | 113 |
+| `reader-ft` best (epoch 31) | 19 (42%) | 46% | 2/5 | 126 |
+| `reader-ft` last (epoch 35) | 19 (42%) | 44% | — | — |
+
+`reader-ft` reads one plate fewer with the better detector than with the worse
+one (19 against 18 is noise; its precision falls from 42% to 46% on a smaller
+base of answers). The extra boxes are extra chances to invent, because it
+answers all 154 of them. **A better detector cannot help a reader that has no
+way to say "I cannot read this."** Both CRNNs return text on 100% of crops.
 
 Eight epochs on under two thousand crops moved it from nothing to a third, and
 the remaining errors became near-misses (`ML10B9306` -> `ML10B9308`). The

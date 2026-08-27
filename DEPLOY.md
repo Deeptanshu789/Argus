@@ -80,13 +80,18 @@ From the build machine:
 
 ```bash
 rsync -av runs/detect/plate-k12/ USER@VPS:/home/USER/Argus/runs/detect/plate-k12/
-rsync -av runs/reader-k12/       USER@VPS:/home/USER/Argus/runs/reader-k12/
+rsync -av runs/reader-ft/        USER@VPS:/home/USER/Argus/runs/reader-ft/
 ```
+
+The reader directory is whichever one `_READER_DEFAULT` in `ml/sidecar.py`
+names — it has moved between trained readers already, and
+`./scripts/deploy-prepare.sh` reads the path from that file rather than
+keeping a second copy of it.
 
 **Check**, on the VPS:
 
 ```bash
-ls runs/detect/plate-k12/weights/best_openvino_model runs/reader-k12/best.pt
+ls runs/detect/plate-k12/weights/best_openvino_model runs/reader-ft/best.pt
 ```
 
 The OpenVINO directory is the one the sidecar loads. A bare `best.pt` also
