@@ -134,25 +134,46 @@ def build_detection_set() -> Path:
     return dst
 
 
-def cuda_or_die() -> None:
-    """Refuse to start on a GPU this PyTorch cannot drive.
+# The last PyTorch series whose CUDA wheels still carry sm_60 kernels. Kaggle's
+# own torch 2.10 does not, and a session that lands on a Tesla P100 cannot run
+# a single tensor on the GPU without this.
+P100_TORCH = ("torch==2.5.1", "torchvision==0.20.1")
+P100_INDEX = "https://download.pytorch.org/whl/cu121"
 
-    Kaggle allocates whatever accelerator is free, and its preinstalled torch
-    2.10 builds no kernels for sm_60. A run that lands on a Tesla P100 then
-    fails on the first .to(device) -- eight minutes in, after the dataset merge,
-    with a traceback that blames ultralytics. Checking first turns that into one
-    line at the top of the log."""
+
+def cuda_or_die() -> None:
+    """Make the GPU usable, whichever one Kaggle handed us.
+
+    Kaggle allocates whatever accelerator is free and ignores the metadata
+    request often enough that it cannot be relied on: three runs asked for a T4
+    and got a P100. Its preinstalled torch 2.10 builds no kernels for sm_60, so
+    training dies on the first .to(device) with a traceback that blames
+    ultralytics.
+
+    Rather than fail and wait for a luckier draw, install a torch that does
+    support the card and start again. The re-exec happens ONCE -- guarded by an
+    environment variable, because a reinstall that does not fix the arch would
+    otherwise loop until the session limit."""
     import torch
     if not torch.cuda.is_available():
         sys.exit("no CUDA device; this kernel needs a GPU accelerator")
     major, minor = torch.cuda.get_device_capability(0)
-    name = torch.cuda.get_device_name(0)
+    name, arch = torch.cuda.get_device_name(0), f"sm_{major}{minor}"
     arches = torch.cuda.get_arch_list()
-    print(f"GPU {name}  sm_{major}{minor}  torch {torch.__version__}")
+    print(f"GPU {name}  {arch}  torch {torch.__version__}")
     print("torch was built for:", " ".join(arches))
-    if f"sm_{major}{minor}" not in arches:
-        sys.exit(f"{name} is sm_{major}{minor} and this torch builds none. "
-                 f"Set accelerator to nvidiaTeslaT4 in kernel-metadata.json.")
+    if arch in arches:
+        return
+
+    if os.environ.get("ARGUS_TORCH_SWAPPED"):
+        sys.exit(f"{name} is {arch} and even {P100_TORCH[0]} builds no kernels "
+                 f"for it. Set the notebook's accelerator to T4 by hand.")
+    print(f"\n{arch} unsupported -- installing {' '.join(P100_TORCH)} "
+          f"and restarting", flush=True)
+    run([sys.executable, "-m", "pip", "install", "-q", "--index-url", P100_INDEX,
+         *P100_TORCH])
+    os.environ["ARGUS_TORCH_SWAPPED"] = "1"
+    os.execv(sys.executable, [sys.executable, *sys.argv])
 
 
 def train_detector(data: Path) -> None:
