@@ -22,5 +22,6 @@
     "dataclusterlabs/vehicle-image-captioning-dataset"
   ],
   "competition_sources": [],
-  "kernel_sources": []
+  "kernel_sources": [],
+  "accelerator": "nvidiaTeslaT4"
 }

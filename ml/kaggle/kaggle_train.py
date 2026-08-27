@@ -134,6 +134,27 @@ def build_detection_set() -> Path:
     return dst
 
 
+def cuda_or_die() -> None:
+    """Refuse to start on a GPU this PyTorch cannot drive.
+
+    Kaggle allocates whatever accelerator is free, and its preinstalled torch
+    2.10 builds no kernels for sm_60. A run that lands on a Tesla P100 then
+    fails on the first .to(device) -- eight minutes in, after the dataset merge,
+    with a traceback that blames ultralytics. Checking first turns that into one
+    line at the top of the log."""
+    import torch
+    if not torch.cuda.is_available():
+        sys.exit("no CUDA device; this kernel needs a GPU accelerator")
+    major, minor = torch.cuda.get_device_capability(0)
+    name = torch.cuda.get_device_name(0)
+    arches = torch.cuda.get_arch_list()
+    print(f"GPU {name}  sm_{major}{minor}  torch {torch.__version__}")
+    print("torch was built for:", " ".join(arches))
+    if f"sm_{major}{minor}" not in arches:
+        sys.exit(f"{name} is sm_{major}{minor} and this torch builds none. "
+                 f"Set accelerator to nvidiaTeslaT4 in kernel-metadata.json.")
+
+
 def train_detector(data: Path) -> None:
     from ultralytics import YOLO
     model = YOLO(DET_MODEL)
@@ -192,6 +213,7 @@ def main() -> None:
     clone_repo()
     run([sys.executable, "-m", "pip", "install", "-q", "ultralytics"])
 
+    cuda_or_die()
     crops = find_input("argus-reader-crops", "reader-crops")
     if crops is None:
         sys.exit("the real crop dataset is not attached")
