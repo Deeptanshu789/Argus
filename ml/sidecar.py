@@ -528,8 +528,20 @@ PLATE_AGREE_STOP = 2
 def find_plate_weights() -> str | None:
     """Trained plate detector, if one has been exported. Returns None when it
     has not: the sidecar must still run end to end on stock weights, or nothing
-    downstream can be developed before the Kaggle run finishes."""
+    downstream can be developed before the Kaggle run finishes.
+
+    ARGUS_PLATE_MODEL overrides the search, the same way ARGUS_READER overrides
+    the reader: a candidate detector is tried by path against the shipped one,
+    never by being copied over it. Both halves of the read have to be measured
+    together -- a detector that crops tighter changes what the reader sees --
+    so being able to swap either side without moving a file is what makes the
+    comparison cheap enough to actually run."""
     from pathlib import Path
+    override = os.environ.get("ARGUS_PLATE_MODEL")
+    if override:
+        if not Path(override).exists():
+            raise SystemExit(f"ARGUS_PLATE_MODEL does not exist: {override}")
+        return override
     for c in PLATE_CANDIDATES:
         if Path(c).exists():
             return c
