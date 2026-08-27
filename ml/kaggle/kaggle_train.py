@@ -53,7 +53,10 @@ DET_MODEL = "yolo11s.pt"
 DET_EPOCHS = 80
 DET_IMGSZ = 640            # train larger than we infer; the export sets 480
 
-READER_EPOCHS = 120
+# 60, not 120. Each epoch now sees 178,266 samples against the local run's
+# 78,650, so 60 epochs is roughly twice the gradient steps that run took --
+# and it has to share a 12-hour session with the detector.
+READER_EPOCHS = 60
 READER_HIDDEN = 256        # 192 locally; a GPU can afford the wider LSTM
 READER_BATCH = 256
 
