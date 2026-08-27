@@ -345,6 +345,43 @@ base of answers). The extra boxes are extra chances to invent, because it
 answers all 154 of them. **A better detector cannot help a reader that has no
 way to say "I cannot read this."** Both CRNNs return text on 100% of crops.
 
+### The confidence floor — the fix was 20 lines, not another training run
+
+`READER_MIN_CONF` in `ml/sidecar.py` drops a CRNN read whose mean
+per-character confidence is below the floor, returning nothing rather than a
+guess. `ml/sweep_floor.py` picks the value by running the real
+`ml/score_plates.py` at each threshold, so the numbers cannot drift from the
+ones quoted anywhere else. With `reader-k12` and the `plate-k12` detector:
+
+| floor | correct | wrong | missed | precision |
+|---|---|---|---|---|
+| 0.00 | 25 | 17 | 3 | 60% |
+| 0.90 | 25 | 12 | 8 | 68% |
+| 0.95 | 28 | 6 | 11 | 82% |
+| **0.99** | **29** | **3** | **13** | **91%** |
+| 0.995 | 27 | 3 | 15 | 90% |
+| 0.999 | 24 | 3 | 18 | 89% |
+
+0.99 is the knee. Wrong reads fall from 17 to 3 and precision from 60% to 91%
+— most of PaddleOCR's lead recovered with no retraining at all.
+
+**Correct reads go UP, 25 to 29**, which a filter that only removes answers
+should not be able to do. `_read_plate()` tries two preprocessing variants and
+keeps the first that yields a plate, so a confident-but-wrong read on the first
+variant used to win and end the search. Rejecting it lets the second variant
+run. The floor is not only a filter; it un-blocks a retry that was already
+there.
+
+On the KIIT clip the effect is sharper still, because a 44-pixel median box is
+mostly unreadable: **reads matching no legible plate go from 114 to zero**, and
+exactly-right is unchanged at 1 of 5. Only 2 of 154 crops clear the floor.
+That is the floor working, not failing — the reader was never reading those
+crops, it was inventing plates for them.
+
+PaddleOCR is still ahead (38 correct, 95%, and 4 of 5 on the video). The gap is
+now reading ability rather than restraint, which is the gap more real crops
+close.
+
 Eight epochs on under two thousand crops moved it from nothing to a third, and
 the remaining errors became near-misses (`ML10B9306` -> `ML10B9308`). The
 binding constraint is the amount of real data, not the architecture: 1,756
@@ -497,6 +534,7 @@ python ml/demo_detect.py --source photo.jpg --ocr        # eyeball the detector
 python ml/bench.py --source clip.mp4                     # ms per pipeline stage
 python ml/diagnose_video.py --source clip.mp4 --truth ml/groundtruth_kiit.csv
 python ml/prepare_dataset.py --src A B C --dst datasets/plates-merged  # merge datasets
+python ml/sweep_floor.py --model runs/detect/plate-k12/weights/best.pt  # pick READER_MIN_CONF
 python ml/make_demo_clips.py                # synthetic demo/cam*.mp4 test clips
 python ml/train_plate.py --epochs 50        # on Kaggle
 python ml/export_onnx.py --weights runs/detect/plate/weights/best.pt --fp32
@@ -615,7 +653,7 @@ OCR silently reads nothing forever.
 | `ml/bench.py`, `ml/diagnose_video.py` | Per-stage timings, per-stage plate losses |
 | `test/smoke.ts` | 38 checks incl. a live end-to-end pipeline run |
 | Trained plate weights | Done — YOLO11s `plate-k12`, mAP50 0.974, 38/45 with PaddleOCR |
-| Trained reader weights | In service — CRNN `reader-k12`, 25/45, precision 60% |
+| Trained reader weights | In service — CRNN `reader-k12` + 0.99 floor, 29/45, precision 91% |
 | `src/app/(dashboard)` | Done — live, map, analytics, search, upload, devices |
 | Real traffic footage | Upload it at `/upload` — no code change needed |
 

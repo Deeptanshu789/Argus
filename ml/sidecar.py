@@ -792,10 +792,37 @@ def apply_thread_limit() -> None:
 # YOLO11s detector. Measurements for the pair live in CLAUDE.md; re-measure
 # BOTH sides whenever either changes, because a detector that crops differently
 # changes what the reader sees.
-_READER_DEFAULT = "runs/reader-ft/best.pt"
+_READER_DEFAULT = "runs/reader-k12/best.pt"
 READER_WEIGHTS = os.environ.get("ARGUS_READER", _READER_DEFAULT) or None
 if READER_WEIGHTS == "paddle" or not os.path.exists(READER_WEIGHTS or ""):
     READER_WEIGHTS = None
+
+# Minimum mean per-character confidence a CRNN read must reach to be returned
+# at all. See CrnnReader.predict(). Swept over ml/groundtruth_test50.csv with
+# ml/sweep_floor.py against runs/reader-k12 and the plate-k12 detector:
+#
+#   floor   correct  wrong  missed  precision
+#    0.00        25     17       3        60%
+#    0.90        25     12       8        68%
+#    0.95        28      6      11        82%
+#    0.99        29      3      13        91%   <- here
+#    0.995       27      3      15        90%
+#    0.999       24      3      18        89%
+#
+# 0.99 is the knee: above it correct reads fall away and precision does not
+# improve. Wrong reads drop from 17 to 3 and precision from 60% to 91%, which
+# is most of PaddleOCR's 95% lead recovered without retraining anything.
+#
+# CORRECT READS GO UP, 25 to 29, which looks impossible for a filter that only
+# ever removes answers. _read_plate() tries two preprocessing variants and
+# keeps the first that yields a plate; a confident-but-wrong read on the first
+# variant used to win and stop the search. Rejecting it lets the second variant
+# be tried at all. The floor does not only discard junk -- it un-blocks a retry
+# that was already there.
+#
+# ARGUS_READER_MIN_CONF overrides it; 0.0 restores answer-everything, which is
+# what the sweep needs and what every pre-floor measurement was taken with.
+READER_MIN_CONF = float(os.environ.get("ARGUS_READER_MIN_CONF", "0.99"))
 
 
 class CrnnReader:
@@ -856,6 +883,26 @@ class CrnnReader:
                 keep.append(pr)
             prev = k
         score = sum(keep) / len(keep) if keep else 0.0
+
+        # THE FLOOR. This is the one thing a CTC reader cannot do for itself:
+        # a softmax over 37 classes always has an argmax, so the model emits a
+        # plate for a 15-pixel smear exactly as confidently as it declines to,
+        # which is not at all. correct_plate() cannot catch it either, because
+        # what a well-trained reader invents is grammatical -- MH02DK1434 is a
+        # perfectly legal registration that no vehicle in the frame carries.
+        #
+        # PaddleOCR gets abstention for free: its text detector finds no line
+        # in an unreadable crop and there is nothing to recognise. That, not
+        # accuracy, was the whole of its 95%-to-60% precision lead.
+        #
+        # Below the floor return NOTHING, not a low-confidence read. Downstream
+        # is built on `null` meaning "not known yet", and a plate no camera can
+        # actually see is worse for cross-camera association than no plate at
+        # all: layer 1 matches on exact text, so one invented plate agreeing
+        # with another invented plate is a confirmed match between two vehicles
+        # that were never the same.
+        if score < READER_MIN_CONF:
+            return []
         return [{"rec_texts": [text], "rec_scores": [score]}]
 
 
