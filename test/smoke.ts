@@ -443,9 +443,30 @@ async function pipelineSuite() {
     void matched;
   });
 
+  /**
+   * Counts, read only once they have stopped moving.
+   *
+   * runWorker resolves 1.5s after SIGINT and then SIGKILLs, so a match being
+   * written when the signal arrived can land AFTER the sample. The replay
+   * check compares two global counts, so that straggler is indistinguishable
+   * from a duplicate: the suite failed with "matches went 133500 -> 133501"
+   * on a run where nothing was duplicated at all. Sampling twice and waiting
+   * for agreement costs a second and makes the check mean what it says.
+   */
+  const settled = async () => {
+    let prev = await counts();
+    for (let i = 0; i < 10; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+      const now = await counts();
+      if (now.m === prev.m && now.t === prev.t) return now;
+      prev = now;
+    }
+    return prev;
+  };
+
   const before = await counts();
   await runWorker(22);
-  const afterFirst = await counts();
+  const afterFirst = await settled();
 
   check("the pipeline produces cross-camera matches", () => {
     assert(afterFirst.m > before.m || before.m > 0,
@@ -458,7 +479,7 @@ async function pipelineSuite() {
 
   // Replay. Same events, same matches: nothing new may be created.
   await runWorker(22);
-  const afterSecond = await counts();
+  const afterSecond = await settled();
 
   check("replaying the same events creates no duplicate matches", () => {
     assert(afterSecond.m === afterFirst.m,
