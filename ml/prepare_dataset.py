@@ -196,7 +196,17 @@ def load_voc(src: Path, images: dict[str, Path]) -> dict[Path, list[Box]]:
         boxes = []
         for obj in root.findall("object"):
             label = (obj.findtext("name") or "").lower()
-            if label and not any(word in label for word in PLATE_WORDS):
+            # THE LABEL IS SOMETIMES THE PLATE ITSELF, not a class name.
+            # saisirishan/indian-vehicle-dataset writes <name>AN01P9687</name>,
+            # so a plate-word filter drops every object in all 1,697 files and
+            # the set is reported as having no annotations at all. A label that
+            # reads like a registration -- letters and digits, no spaces, plate
+            # length -- names this box as surely as the word "plate" does.
+            looks_like_plate = (6 <= len(label) <= 12 and label.isalnum()
+                                and any(c.isdigit() for c in label)
+                                and any(c.isalpha() for c in label))
+            if label and not looks_like_plate \
+                    and not any(word in label for word in PLATE_WORDS):
                 continue
             bb = obj.find("bndbox")
             if bb is None:

@@ -1,0 +1,21 @@
+{
+  "id": "deeptanshu789/argus-plate-detector-and-reader",
+  "title": "Argus plate detector and reader",
+  "code_file": "kaggle_train.py",
+  "language": "python",
+  "kernel_type": "script",
+  "is_private": true,
+  "enable_gpu": true,
+  "enable_internet": true,
+  "dataset_sources": [
+    "deeptanshu789/argus-reader-crops",
+    "kedarsai/indian-license-plates-with-labels",
+    "saisirishan/indian-vehicle-dataset",
+    "tkm22092/indian-number-plate-images",
+    "abtexp/synthetic-indian-license-plates",
+    "raspberrypi5/indian-commercial-vehicle-number-plate",
+    "fareselmenshawii/large-license-plate-dataset"
+  ],
+  "competition_sources": [],
+  "kernel_sources": []
+}

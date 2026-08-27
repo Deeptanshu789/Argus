@@ -243,14 +243,98 @@ tighter model happened to produce more often. **Judge a detector by `correct`,
 never by mAP — and re-measure both sides whenever either the detector or the
 reader changes.** A stale comparison is worse than none.
 
-**Three detectors now read exactly 39 of 45**: 1,365 images at mAP 0.928, 8,023
-at 0.991, and a 9,785-image merged fine-tune at 0.982. The detector finds a
-plate in 44 of the 45 photographs, so a perfect one could add one plate. This
-test set has no resolution left to judge a detector with, and the six remaining
-failures are all the reader. The fine-tune also read one plate FEWER on the real
-video — the only test here with motion and glare in it — so the shipped weights
-stay. **Do not train another detector against `groundtruth_test50.csv`**; label
-more truth or train a reader.
+**Four detectors now read exactly 39 of 45**: 1,365 images at mAP 0.928, 8,023
+at 0.991, a 9,785-image merged fine-tune at 0.982, and a 10,240-image fine-tune
+(`plate-v2`) at 0.987. The detector finds a plate in 44 of the 45 photographs,
+so a perfect one could add one plate. This test set has no resolution left to
+judge a detector with, and the six remaining failures are all the reader. The
+9,785 fine-tune also read one plate FEWER on the real video — the only test here
+with motion and glare in it — so the shipped weights stay. **Do not train
+another detector against `groundtruth_test50.csv`**; label more truth or train a
+reader.
+
+### Most of that training data is not Indian
+
+`datasets/plates` — 8,823 of the 10,240 merged images, and the bulk of every
+"full retrain" above — is a GENERIC licence-plate set. Its crops are British and
+European: `DS08 PCZ`, `LT07 FDJ`, one carrying an `EST` euroband. Only 1,648
+merged images are Indian, from the Quobotic set.
+
+That is why mAP rose from 0.928 to 0.991 while real reading did not move at all:
+those runs fitted European plates and were validated on European plates. For a
+DETECTOR this is harmless-to-useful — a plate is a rectangle of high-contrast
+text whatever country issued it — which is exactly why every one of the four
+scores 39/45. For a READER it is worthless, and `correct_plate()` rejects all of
+it, because it validates Indian registration grammar.
+
+**Never quote a plate-dataset size without saying how much of it is Indian.**
+
+### A third of the Indian set is mirrored
+
+Roboflow's commonest augmentation is a horizontal flip, and the export ships the
+flipped copies as ordinary images. Harmless to a detector, which still sees a
+plate. Poison to a reader: the text runs backwards, PaddleOCR reads it anyway,
+and `correct_plate()` accepts the result because a reversed plate is often still
+a grammatical one — `TN21TA0492` was being written down as `TN21AT0492` with
+nothing downstream able to tell. `ml/make_reader_crops.py` reads every crop both
+ways round and keeps the higher-scoring orientation, which rejects the mirrors
+and repairs them in one pass. 758 of 1,756 crops (43%) needed it.
+
+## The reader — `ml/train_reader.py`
+
+The detector finds a plate in 44 of 45 photographs and the system reads 39, so
+every remaining failure but one is the READ. `ml/train_reader.py` trains a CRNN
+with CTC loss to replace PaddleOCR: 2.11M parameters, 32x256 grayscale input,
+37 classes. Small on purpose — it trains on this laptop's CPU and runs in
+milliseconds against PaddleOCR's 163 ms.
+
+`ARGUS_READER=<checkpoint>` switches the sidecar to it. **Opt-in by path, never
+by the file merely existing**: every measurement in this document was taken with
+PaddleOCR, and a reader that has not been scored against
+`ml/groundtruth_test50.csv` must not be able to replace it by turning up on
+disk. `make_reader()` remains the single construction site and falls back to
+PaddleOCR if the checkpoint will not load.
+
+### Two-line plates are split and laid side by side
+
+CTC alignment is monotone: the model emits characters left to right and can
+never go back. A two-line plate asks it to read the top row across the image and
+then the bottom row across the same columns, which monotone alignment cannot
+express at all. `to_strip()` cuts at the gap between the rows and concatenates.
+The same transform runs at training and at inference — if they ever diverge the
+model reads noise.
+
+### Synthetic data does not transfer, and the fix is measured
+
+Both public reader datasets are renders. Trained on them alone the CRNN reaches
+83% on held-out synthetic and reads **0 of 45** real photographs — it learned a
+font, not a plate. Its errors were not nonsense but structured: `AP39E1493` read
+as `KA39E1493`, `DL9CAU4743` as `LD9CAA47431`. Digits right, state letters
+wrong.
+
+`ml/make_reader_crops.py` fixes it by building real training data the project
+already had the raw material for: crop every hand-drawn plate box out of the
+Indian detection set and label it with PaddleOCR. Pseudo-labelling, with an
+honest ceiling — the reader cannot learn to beat PaddleOCR where PaddleOCR is
+wrong — but the renders cannot teach real fonts, dirt, angles or lighting, and
+these can.
+
+| reader | correct of 45 | CER | precision |
+|---|---|---|---|
+| PaddleOCR (shipped) | **39 (87%)** | 9.4% | 95% |
+| CRNN, synthetic only | 0 (0%) | 82.6% | 0% |
+| CRNN, +1,756 real crops, 8 epochs | 16 (36%) | 34.9% | 42% |
+
+Eight epochs on under two thousand crops moved it from nothing to a third, and
+the remaining errors became near-misses (`ML10B9306` -> `ML10B9308`). The
+binding constraint is the amount of real data, not the architecture: 1,756
+crops, 736 unique plates, 49% Maharashtra. Video is the only plentiful source —
+`--video` runs the sidecar's own vehicle-then-plate stages over traffic footage.
+
+**Never train the reader on `~/indian-plates/test` or on the KIIT clip.** They
+are what `groundtruth_test50.csv` and `groundtruth_kiit.csv` score against, and
+training on them turns the only honest measurements in this project into a
+memory test.
 
 Full procedure, three training routes, a catalogue of further Indian plate
 datasets with licences, and the current dataset ([Quobotic Indian number plate on

@@ -39,6 +39,7 @@ clears on 16 Zen 5 threads. Per-frame OCR or Re-ID does not.
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from datetime import datetime, timezone
@@ -70,6 +71,20 @@ DIGIT_FOR = {"O": "0", "Q": "0", "I": "1", "L": "1", "B": "8", "S": "5", "Z": "2
 # NOT derived by inverting DIGIT_FOR: that map is many-to-one (O and Q both go
 # to 0), so inverting it silently picks whichever key came last. Spelled out.
 ALPHA_FOR = {"0": "O", "1": "I", "8": "B", "5": "S", "2": "Z"}
+
+# THE SHAPES A REAL INDIAN REGISTRATION CAN TAKE.
+#
+# correct_plate() builds a plate by forcing each slot into the class its
+# position demands, which repairs the common confusions but cannot notice that
+# the result is not a registration at all. These patterns are the final say: a
+# string that matches none of them is not written down.
+#
+#   MH 05 DK 101      state, district, series, number -- the ordinary plate
+#   24 BH 9662 FZ     the Bharat series, which carries no state code at all
+PLATE_FORMATS = (
+    re.compile(r"^[A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{2,4}$"),
+    re.compile(r"^[0-9]{2}BH[0-9]{4}[A-Z]{1,2}$"),
+)
 STATE_CODES = {
     "AP","AR","AS","BR","CG","CH","DD","DL","DN","GA","GJ","HP","HR","JH","JK",
     "KA","KL","LA","LD","MH","ML","MN","MP","MZ","NL","OD","PB","PY","RJ","SK",
@@ -242,6 +257,26 @@ def _fix(chunk: str, want_digit: bool) -> tuple[str, int] | None:
     return "".join(out), fixes
 
 
+def _bh_plate(s: str) -> tuple[str, int] | None:
+    """The Bharat series: two year digits, the letters BH, four digits, one or
+    two letters. It has no state code, so correct_plate()'s ordinary path
+    rejects it outright -- `24BH9662FZ` starts with digits where a state must
+    be. Every slot's class is fixed by position, which makes it the easiest
+    shape here to repair."""
+    if not 9 <= len(s) <= 10:
+        return None
+    year = _fix(s[:2], want_digit=True)
+    bh = _fix(s[2:4], want_digit=False)
+    number = _fix(s[4:8], want_digit=True)
+    series = _fix(s[8:], want_digit=False)
+    if year is None or bh is None or number is None or series is None:
+        return None
+    if bh[0] != "BH":
+        return None
+    plate = year[0] + bh[0] + number[0] + series[0]
+    return plate, year[1] + bh[1] + number[1] + series[1]
+
+
 def correct_plate(raw: str) -> tuple[str | None, float]:
     """Validate and repair an OCR read of an Indian registration plate.
 
@@ -272,9 +307,27 @@ def correct_plate(raw: str) -> tuple[str | None, float]:
     if not 9 <= len(s) <= 11:
         return None, 0.0
 
+    best = _parse_plate(s)
+    if best is None:
+        return None, 0.0
+
+    # THE LAST SAY. Everything above forces characters into the class their
+    # position demands, which cannot notice that the result is not a
+    # registration. A string matching no real format is not written down.
+    if not any(f.match(best[0]) for f in PLATE_FORMATS):
+        return None, 0.0
+    return best[0], round(best[1] * 0.05, 4)
+
+
+def _parse_plate(s: str) -> tuple[str, int] | None:
+    """One reading of an already-cleaned string: (plate, corrections made)."""
+    bh = _bh_plate(s)
+    if bh is not None:
+        return bh
+
     state = _state_code(s[:2])
     if state is None:
-        return None, 0.0
+        return None
 
     best: tuple[str, int] | None = None
     # Prefer the longest trailing number and the longest district that parse:
@@ -297,9 +350,7 @@ def correct_plate(raw: str) -> tuple[str | None, float]:
         if best is not None:
             break          # a 4-digit number beat a 3-digit one; stop here
 
-    if best is None:
-        return None, 0.0
-    return best[0], round(best[1] * 0.05, 4)
+    return best
 
 
 # Camera ordering for the synthetic demo. The vehicle travels CAM1 -> CAM3 ->
@@ -700,8 +751,88 @@ def apply_thread_limit() -> None:
         pass
 
 
+# The trained plate reader from ml/train_reader.py, when one is wanted.
+#
+# OPT-IN BY PATH, not by the file merely existing. PaddleOCR is what every
+# measurement in CLAUDE.md was taken with, and a reader that has not been scored
+# against ml/groundtruth_test50.csv must not be able to replace it by turning up
+# on disk. Point ARGUS_READER at the weights, measure, and only then change this
+# default.
+READER_WEIGHTS = os.environ.get("ARGUS_READER") or None
+
+
+class CrnnReader:
+    """ml/train_reader.py's CRNN, behind the same predict() call PaddleOCR answers.
+
+    Same call in, same shape out, deliberately: _ocr_lines(), _read_plate(),
+    correct_plate() and the five scripts that measure a reader all keep working
+    unchanged, and which reader is in use stays a decision made in exactly one
+    place -- make_reader().
+
+    It returns ONE line where PaddleOCR returns one per line of text, because
+    to_strip() has already laid a two-line plate out as a single line. The
+    joining that _read_plate() does for PaddleOCR is then a no-op rather than a
+    conflict.
+    """
+
+    def __init__(self, weights: str):
+        import torch
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import train_reader as reader_mod
+
+        ckpt = torch.load(weights, map_location="cpu", weights_only=False)
+        self._mod = reader_mod
+        self._torch = torch
+        self.model = reader_mod.build_model(ckpt.get("hidden", 192))
+        self.model.load_state_dict(ckpt["model"])
+        self.model.eval()
+        if _THREADS and _THREADS.isdigit():
+            torch.set_num_threads(int(_THREADS))
+        print(f"reader: CRNN {weights} "
+              f"(held-out exact {ckpt.get('accuracy', 0) * 100:.1f}%, "
+              f"epoch {ckpt.get('epoch', '?')})", file=sys.stderr)
+
+    def predict(self, image):
+        import cv2
+        import numpy as np
+
+        if image is None or getattr(image, "size", 0) == 0:
+            return []
+        gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+        strip = self._mod.to_strip(gray)
+        x = self._torch.from_numpy(np.ascontiguousarray(strip)).float()
+        x = x.div_(127.5).sub_(1.0).unsqueeze(0).unsqueeze(0)
+        with self._torch.no_grad():
+            logits = self.model(x)
+        text = self._mod.decode(logits)[0]
+        if not text:
+            return []
+
+        # Confidence over the steps that actually EMITTED a character -- the
+        # blanks between characters are usually near-certain and would drag any
+        # whole-sequence average up towards 1.0 no matter how unsure the model
+        # was about the characters themselves.
+        probs, best = logits.softmax(-1)[0].max(-1)
+        keep, prev = [], self._mod.BLANK
+        for pr, k in zip(probs.tolist(), best.tolist()):
+            if k != prev and k != self._mod.BLANK:
+                keep.append(pr)
+            prev = k
+        score = sum(keep) / len(keep) if keep else 0.0
+        return [{"rec_texts": [text], "rec_scores": [score]}]
+
+
 def make_reader():
-    """The PaddleOCR instance the whole project uses. None if it will not load."""
+    """The reader the whole project uses. None if none will load."""
+    if READER_WEIGHTS:
+        try:
+            return CrnnReader(READER_WEIGHTS)
+        except Exception as exc:
+            # Falling back rather than failing: an unreadable checkpoint should
+            # cost accuracy, not the whole pipeline.
+            print(f"reader: {READER_WEIGHTS} would not load "
+                  f"({type(exc).__name__}: {exc}); using PaddleOCR",
+                  file=sys.stderr)
     try:
         from paddleocr import PaddleOCR
         kw = {}
@@ -1095,6 +1226,18 @@ def _selfcheck() -> None:
     assert correct_plate("KA01MB12")[0] is None, "too short"
     assert correct_plate("KA01MB12345678")[0] is None, "too long"
     assert correct_plate("K#01MB1234")[0] is None, "punctuation strips to wrong length"
+
+    # The Bharat series carries no state code, so the ordinary path rejects it.
+    assert correct_plate("24BH9662FZ")[0] == "24BH9662FZ", "BH series is a real plate"
+    assert correct_plate("24BH9662F")[0] == "24BH9662F", "one series letter is valid"
+    assert correct_plate("Z4BH9662FZ")[0] == "24BH9662FZ", "Z for 2 in the year"
+    assert correct_plate("24B119662FZ")[0] is None, "BH is literal, not a guess"
+
+    assert correct_plate("KA01MB1Z34")[0] == "KA01MB1234", "Z for 2 in the number"
+    assert correct_plate("KAO1MB1234")[0] == "KA01MB1234", "O for 0 in the district"
+
+    # A string can survive every class repair and still not be a registration.
+    assert correct_plate("KA1234567")[0] is None, "no series letters at all"
     assert correct_plate("CRETA")[0] is None, "a badge is not a plate"
     assert correct_plate("06A929")[0] is None, "half a plate must not pass"
 
@@ -1196,6 +1339,18 @@ def _selfcheck() -> None:
     line = buf.getvalue()
     assert line.count("\n") == 1, f"stdout leaked into the protocol channel: {line!r}"
     assert line.endswith("\n") and json.loads(line)["event"] == "ready"
+    # CrnnReader promises PaddleOCR's output shape. Nothing else in the file
+    # would notice if it stopped keeping that promise -- _ocr_lines() would
+    # simply return no lines, every plate would go unread, and the sidecar
+    # would look healthy the whole time. Pin the shape with a stub, so the
+    # check runs with no weights and no torch present.
+    class _Stub:
+        def predict(self, image):
+            return [{"rec_texts": ["KA41WV6686"], "rec_scores": [0.91]}]
+
+    assert _ocr_lines(_Stub(), None) == [("KA41WV6686", 0.91)]
+    assert correct_plate("KA41WV6686")[0] == "KA41WV6686"
+
     # make_reader() is the only place a PaddleOCR is built, and that is the
     # whole point of it: five scripts used to carry their own copy of these
     # arguments, so a number measured by one did not necessarily describe what

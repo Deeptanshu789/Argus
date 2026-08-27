@@ -664,19 +664,51 @@ automatically — no code change, no restart beyond the worker.
 
 Five of six current failures are OCR, not detection. In rough order of value:
 
-1. **A plate-specific OCR model.** Every error left on real footage is `O` read
-   for `D` or `Q` in the series letters. The state code has a closed set of 36
-   valid answers and `_state_code()` in `ml/sidecar.py` repairs it against that
-   list; the series letters have no such set, so a guess there would corrupt
-   genuine `O` series and cannot be made safely. PaddleOCR is trained on
-   documents. A small CRNN or a TrOCR fine-tune on plate crops is the only real
-   fix, and the two synthetic Kaggle sets listed above are labelled for it.
+1. **A plate-specific OCR model — STARTED, see `ml/train_reader.py`.** Every
+   error left on real footage is `O` read for `D` or `Q` in the series letters.
+   The state code has a closed set of 36 valid answers and `_state_code()` in
+   `ml/sidecar.py` repairs it against that list; the series letters have no such
+   set, so a guess there would corrupt genuine `O` series and cannot be made
+   safely. PaddleOCR is trained on documents.
+
+   A 2.11M-parameter CRNN with CTC loss now exists and trains on this laptop's
+   CPU. What it measured:
+
+   | training data | correct of 45 | CER | precision |
+   |---|---|---|---|
+   | PaddleOCR (shipped, for comparison) | **39 (87%)** | 9.4% | 95% |
+   | 48,026 synthetic crops only | 0 (0%) | 82.6% | 0% |
+   | + 1,756 real crops, 8 epochs | 16 (36%) | 34.9% | 42% |
+
+   **The synthetic sets on their own are worthless for this.** Both are renders;
+   a model trained on them reads held-out renders at 83% and real photographs at
+   zero. It learns a font. Real crops are the whole game, and eight epochs on
+   fewer than two thousand of them took it from nothing to a third, with the
+   remaining errors becoming near-misses rather than nonsense.
+
+   `ml/make_reader_crops.py` builds them: crop every hand-drawn plate box out of
+   the Indian detection set, label it with PaddleOCR, keep only reads that
+   `correct_plate()` accepts with little repair. `--video` does the same over
+   traffic footage through the sidecar's own vehicle-then-plate stages, which is
+   the only plentiful source. Two traps it handles, both of which silently
+   poison the labels:
+
+   - **43% of the Roboflow crops are horizontally mirrored.** Every crop is read
+     both ways round and the higher-scoring orientation wins.
+   - **Some dataset boxes are not plate-shaped** — one is 106x439, taller than
+     it is wide. OCR returns something from them anyway.
+
+   Never build crops from `~/indian-plates/test` or the KIIT clip. Those are the
+   test sets.
 2. **Label more ground truth.** 45 plates is a thin test set; 200 would make
    every number in this file trustworthy, and it is an afternoon of typing.
    `ml/groundtruth_test50.csv` shows the format, and `ml/groundtruth_kiit.csv`
    shows the same for a video, one line per vehicle rather than per track.
-3. **Train on several datasets at once.** Route C. 10,098 unique images from the
-   two already on this machine, and more from the table above.
+3. **Train on several datasets at once.** Route C. 10,240 unique images from the
+   four now on this machine, and more from the table above — but note that only
+   1,648 of them are INDIAN plates. `datasets/plates`, the bulk of every full
+   retrain here, is a generic European set. Harmless for a detector, worthless
+   for a reader.
 4. **Tune `PLATE_PAD`.** Already worth 62% → 78% once. Free, and it must be
    redone whenever the detector changes.
 5. Retraining the detector on one dataset from scratch. Cheap, and twice now
