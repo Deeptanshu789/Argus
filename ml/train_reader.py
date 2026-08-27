@@ -357,8 +357,14 @@ def main() -> None:
 
     if _THREADS and _THREADS.isdigit():
         torch.set_num_threads(int(_THREADS))
-    device = "cpu"
-    print(f"threads: {torch.get_num_threads()}")
+    # CPU is the DEVELOPMENT case, not the only one. This file was written for
+    # a laptop with no NVIDIA GPU and hardcoded "cpu", which is invisible until
+    # it runs somewhere that has one: on Kaggle it put a 3.17M-parameter model
+    # and 178,266 samples through four CPU cores.
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    amp = device == "cuda"
+    print(f"device: {device}" + (f" ({torch.cuda.get_device_name(0)})" if amp else
+                                 f", threads {torch.get_num_threads()}"))
 
     print("indexing:")
     items = index_sources(args.src)
@@ -391,6 +397,7 @@ def main() -> None:
                           num_workers=args.workers, collate_fn=collate,
                           drop_last=True, worker_init_fn=one_thread,
                           persistent_workers=args.workers > 0,
+                          pin_memory=amp,
                           prefetch_factor=4 if args.workers else None)
     val_ld = DataLoader(val_ds, batch_size=args.batch, shuffle=False,
                         num_workers=args.workers, collate_fn=collate,
@@ -428,18 +435,26 @@ def main() -> None:
     # WHERE the characters go before it learns which they are. A run that ended
     # early would have shipped the weights that answer "TP" to everything.
     best_key, t0 = (-1.0, -1e9), time.time()
+    scaler = torch.amp.GradScaler(enabled=amp)
 
     for ep in range(1, args.epochs + 1):
         run_loss = seen = 0
         for step, (x, y, lens) in enumerate(train_ld, 1):
-            logits = model(x.to(device))
-            logp = logits.log_softmax(-1).permute(1, 0, 2)      # T, B, C
+            with torch.autocast(device, enabled=amp):
+                logits = model(x.to(device, non_blocking=True))
+            # THE LOSS STAYS IN FLOAT32. CTC sums probabilities over every
+            # alignment of a 13-character label across 64 timesteps, and in
+            # half precision those products underflow to zero -- the loss
+            # becomes inf and the run dies in its first epoch.
+            logp = logits.float().log_softmax(-1).permute(1, 0, 2)   # T, B, C
             inp_len = torch.full((x.size(0),), logits.size(1), dtype=torch.long)
             loss = ctc(logp, y, inp_len, lens)
             opt.zero_grad(set_to_none=True)
-            loss.backward()
+            scaler.scale(loss).backward()
+            scaler.unscale_(opt)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
-            opt.step()
+            scaler.step(opt)
+            scaler.update()
             sched.step()
             run_loss += loss.item() * x.size(0)
             seen += x.size(0)
