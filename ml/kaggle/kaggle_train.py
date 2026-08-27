@@ -50,7 +50,7 @@ REPO = SCRATCH / "repo"
 # laptop pipeline runs an OpenVINO export at 480px, and s still clears the
 # 20 inferences/sec budget there; m does not, which is why this stops at s.
 DET_MODEL = "yolo11s.pt"
-DET_EPOCHS = 80
+DET_EPOCHS = 40           # over 27,000 images, not 3,000
 DET_IMGSZ = 640            # train larger than we infer; the export sets 480
 
 # 60, not 120. Each epoch now sees 178,266 samples against the local run's
@@ -132,8 +132,11 @@ def build_detection_set() -> Path:
     if not srcs:
         sys.exit("no detection inputs attached")
     print("detection sources:", *[s.name for s in srcs], sep="\n  ")
+    # --subset 0 means EVERYTHING. Its default of 3,000 is a guard for training
+    # on this project's laptop, and on a GPU it silently threw away 25,000 of
+    # the 28,509 merged images -- 94 batches an epoch instead of 890.
     run([sys.executable, REPO / "ml" / "prepare_dataset.py",
-         "--src", *srcs, "--dst", dst])
+         "--src", *srcs, "--dst", dst, "--subset", "0", "--val", "1500"])
     return dst
 
 
