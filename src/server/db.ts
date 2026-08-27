@@ -998,6 +998,12 @@ export async function extendTrajectory(
         `refusing to append and create a cycle`);
       return { id: String(existing.id), track_ids: existing.track_ids.map(String) };
     }
+    // The same check again, this time as part of the UPDATE. The read above
+    // and this write are two statements, so two matches for the same vehicle
+    // arriving together both pass the guard and both append -- which is how
+    // 29 cyclic trajectories were written on a day when the guard was already
+    // in place. Testing inside the WHERE makes the check and the append one
+    // atomic statement, and the loser of the race updates nothing.
     const rows = await sql<{ id: string; track_ids: string[] }[]>`
       UPDATE trajectories
          SET track_ids = array_append(track_ids, ${toTrack}::bigint),
@@ -1005,8 +1011,17 @@ export async function extendTrajectory(
              ended_at = ${endedAt}::timestamptz,
              updated_at = now()
        WHERE id = ${existing.id}::bigint
+         AND array_position(track_ids, ${toTrack}::bigint) IS NULL
       RETURNING id, track_ids`;
-    return { id: String(rows[0]!.id), track_ids: rows[0]!.track_ids.map(String) };
+    if (!rows[0]) {
+      // Lost the race: the other writer appended this track already. Report
+      // the row as it now stands rather than the stale copy read above.
+      const now = await sql<{ id: string; track_ids: string[] }[]>`
+        SELECT id, track_ids FROM trajectories WHERE id = ${existing.id}::bigint`;
+      const row = now[0] ?? existing;
+      return { id: String(row.id), track_ids: row.track_ids.map(String) };
+    }
+    return { id: String(rows[0].id), track_ids: rows[0].track_ids.map(String) };
   }
 
   const rows = await sql<{ id: string; track_ids: string[] }[]>`

@@ -74,20 +74,29 @@ effect yet — log out and back in.
 clone has none, and the worker mounts that directory read-only.
 
 Without the plate detector the sidecar still tracks vehicles, but OCR then runs
-on the whole vehicle crop and reads far fewer plates. From the build machine:
+on the whole vehicle crop and reads far fewer plates. Two directories, because
+`ml/sidecar.py` now defaults to a trained reader as well as a trained detector.
+From the build machine:
 
 ```bash
-rsync -av runs/detect/plate/weights/ USER@VPS:/home/USER/Argus/runs/detect/plate/weights/
+rsync -av runs/detect/plate-k12/ USER@VPS:/home/USER/Argus/runs/detect/plate-k12/
+rsync -av runs/reader-k12/       USER@VPS:/home/USER/Argus/runs/reader-k12/
 ```
 
 **Check**, on the VPS:
 
 ```bash
-ls runs/detect/plate/weights/best_openvino_model
+ls runs/detect/plate-k12/weights/best_openvino_model runs/reader-k12/best.pt
 ```
 
 The OpenVINO directory is the one the sidecar loads. A bare `best.pt` also
 works but is slower.
+
+Copy neither and the box still runs — an untrained detector, and PaddleOCR
+instead of the CRNN. Nothing in any log says the pipeline differs from the one
+you measured, which is why `./scripts/deploy-prepare.sh` checks both paths by
+name. To run PaddleOCR deliberately rather than by accident, set
+`ARGUS_READER=paddle` on the worker service.
 
 ## 3. Generate the secrets
 

@@ -103,14 +103,40 @@ step "Checking the trained weights"
 # clone has none, and the worker mounts the directory read-only. Without them
 # the sidecar still tracks vehicles but reads far fewer plates, because OCR
 # then runs on the whole vehicle crop instead of a detected plate.
-if [ -d runs/detect/plate/weights/best_openvino_model ]; then
-  echo "runs/detect/plate/weights/best_openvino_model present"
+# Both models are checked, and by the paths ml/sidecar.py actually defaults to.
+# Checking only the old detector path reported a healthy deploy while the box
+# ran a different pipeline from the build machine: an older detector, and
+# PaddleOCR instead of the trained reader, with nothing in any log to say so.
+weights_ok=1
+if [ -d runs/detect/plate-k12/weights/best_openvino_model ]; then
+  echo "runs/detect/plate-k12/weights/best_openvino_model present"
+elif [ -d runs/detect/plate/weights/best_openvino_model ]; then
+  echo "  NOTE: only the older runs/detect/plate detector is here."
+  echo "  It works. It is not what this build measures against."
+  weights_ok=0
 else
-  mkdir -p runs
   echo "  WARNING: no plate detector found."
-  echo "  Copy it up from the build machine, or plate reading will be poor:"
+  echo "  Without one the sidecar runs OCR on the whole vehicle crop and"
+  echo "  reads far fewer plates."
+  weights_ok=0
+fi
+
+if [ -f runs/reader-k12/best.pt ]; then
+  echo "runs/reader-k12/best.pt present"
+else
+  echo "  NOTE: no trained reader; the sidecar will fall back to PaddleOCR."
+  echo "  That is the higher-precision reader, so this is safe -- but it is"
+  echo "  not the pipeline the build machine is running."
+  weights_ok=0
+fi
+
+if [ "$weights_ok" = 0 ]; then
+  mkdir -p runs
   echo
-  echo "      rsync -av runs/detect/plate/weights/ USER@THIS_HOST:$(pwd)/runs/detect/plate/weights/"
+  echo "  Copy them up from the build machine:"
+  echo
+  echo "      rsync -av runs/detect/plate-k12/ USER@THIS_HOST:$(pwd)/runs/detect/plate-k12/"
+  echo "      rsync -av runs/reader-k12/      USER@THIS_HOST:$(pwd)/runs/reader-k12/"
 fi
 
 # ---------------------------------------------------------------------------
