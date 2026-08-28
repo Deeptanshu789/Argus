@@ -220,6 +220,11 @@ def train_reader(crops: Path) -> None:
            "--workers", 4,
            "--real", crops,
            "--real-repeat", 20,
+           # 42% of the real crops are Maharashtra and 0.4% are Odisha. Without
+           # this the model answers MH for every plate it cannot read, because
+           # that is what a classifier does with a weak signal, and the result
+           # is a grammatical registration nothing downstream can reject.
+           "--balance-states",
            "--out", OUT / "runs" / "reader-kaggle"]
     if synth:
         cmd += ["--src", *synth]

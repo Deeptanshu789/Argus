@@ -382,6 +382,51 @@ PaddleOCR is still ahead (38 correct, 95%, and 4 of 5 on the video). The gap is
 now reading ability rather than restraint, which is the gap more real crops
 close.
 
+### 42% of the reader's crops are Maharashtra, and it shows
+
+`ml/state_prior.py` counts the state code of every crop the reader trains on:
+**MH 2,811 (42.3%), DL 615 (9.3%) … OD 29 (0.44%)**. A 97x gap between the
+commonest state and the one the KIIT test footage was filmed in.
+
+A classifier falls back on its prior wherever the evidence is weak, so on a
+crop it cannot read the CRNN does not merely prefer MH — it emits MH, and
+`correct_plate()` accepts it because `MH02DK1434` is a real registration.
+Measured on that clip, **42% of the reads matching no legible plate began with
+MH**.
+
+**The obvious inference-time fix does not work, and the measurement is here so
+nobody spends the day re-deriving it.** `best_state()` rescores the two state
+letters as `log p(first) + log p(second) - tau * log prior(code)` over the
+closed set of real codes — textbook logit adjustment, and `ARGUS_STATE_PRIOR_TAU`
+sweeps it:
+
+| tau | KIIT spurious | of those, MH | KIIT exact | photos correct | precision |
+|---|---|---|---|---|---|
+| **0.0 (shipped)** | 114 | 48 (42%) | 1/5 | 25 | 60% |
+| 0.4 | 126 | 45 (35%) | 1/5 | 25 | 58% |
+| 1.0 | 127 | 36 (28%) | 1/5 | 25 | 58% |
+
+It does exactly what it claims — MH's share of the junk falls 42% to 28% — and
+it improves nothing. Not one extra plate is read correctly on either test set,
+and precision drops two points. **The correction redistributes the bias instead
+of removing it.** MH was the symptom; the disease is that the reader cannot
+read a 44 px crop at all, and guessing `OD` on a crop it cannot see is a
+different wrong answer, not a right one. `tau` therefore ships at 0.0 and the
+code stays as an instrumented negative result.
+
+**The fix that can work is at training time.** `--balance-states` in
+`ml/train_reader.py` weights each sample by `1/count(state)`, so every state's
+characters appear equally often in a batch. Sampling, not capping: cutting MH
+to the runner-up's 615 would discard 2,196 real crops, and real crops are this
+reader's binding constraint — the synthetic ones taught it a font and read 0 of
+45. `ml/kaggle/kaggle_train.py` passes it, so the next Kaggle reader is trained
+without the prior rather than corrected after the fact.
+
+Regenerate `STATE_PRIOR` with `ml/state_prior.py` whenever the crop set is
+rebuilt. It is a constant in `ml/sidecar.py` and not a file beside the weights
+because a deploy that shipped one and not the other would apply the wrong
+correction silently.
+
 **The floor ships OFF — `READER_MIN_CONF` defaults to 0.0.** At 0.99 only 2 of
 154 crops from real video clear it, so a dashboard of live traffic shows almost
 no plates, and being shown is what this build is for. The trade is the whole
@@ -544,6 +589,8 @@ python ml/bench.py --source clip.mp4                     # ms per pipeline stage
 python ml/diagnose_video.py --source clip.mp4 --truth ml/groundtruth_kiit.csv
 python ml/prepare_dataset.py --src A B C --dst datasets/plates-merged  # merge datasets
 python ml/sweep_floor.py --model runs/detect/plate-k12/weights/best.pt  # pick READER_MIN_CONF
+python ml/sweep_floor.py --var ARGUS_STATE_PRIOR_TAU --floors 0,0.4,1.0  # or any knob
+python ml/state_prior.py            # regenerate STATE_PRIOR after new crops
 python ml/make_demo_clips.py                # synthetic demo/cam*.mp4 test clips
 python ml/train_plate.py --epochs 50        # on Kaggle
 python ml/export_onnx.py --weights runs/detect/plate/weights/best.pt --fp32

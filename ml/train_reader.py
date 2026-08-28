@@ -177,6 +177,40 @@ def clean_label(text: str) -> str | None:
     return text if any(r.match(text) for r in PLATE_SHAPES) else None
 
 
+def state_balanced_sampler(items: list[tuple[Path, str]]):
+    """Draw each STATE equally often, instead of each image equally often.
+
+    42% of the real crops available for this reader are Maharashtra and 0.4%
+    are Odisha. A classifier falls back on its prior wherever the evidence is
+    weak, so a model trained on that mix answers MH for any plate it cannot
+    read -- and MH02DK1434 is a real registration, so nothing downstream can
+    reject it. Measured on Odisha footage, 42% of the reads that matched no
+    legible plate began with MH.
+
+    Weighting by 1/count(state) equalises how often each state's characters
+    appear in a batch. SAMPLING, not discarding: capping MH at the runner-up's
+    615 would throw away 2,196 real crops, and real crops are the binding
+    constraint on this reader -- the synthetic ones taught it a font and read
+    0 of 45 real photographs. Every image is still reachable; the common ones
+    are simply seen less often.
+
+    The state is the first two characters when they are letters. A BH series
+    plate starts with digits and is pooled under "" -- it has no issuing state
+    by design, which is the whole point of that series.
+    """
+    from collections import Counter
+    from torch.utils.data import WeightedRandomSampler
+
+    keys = [t[:2] if t[:2].isalpha() else "" for _, t in items]
+    n = Counter(keys)
+    weights = [1.0 / n[k] for k in keys]
+    print(f"  state-balanced sampling over {len(n)} states "
+          f"(commonest {n.most_common(1)[0][0]} {n.most_common(1)[0][1]}, "
+          f"rarest {min(n.values())})")
+    return WeightedRandomSampler(weights, num_samples=len(items),
+                                 replacement=True)
+
+
 def index_sources(dirs: list[Path]) -> list[tuple[Path, str]]:
     """(image, plate text) for every usable sample under each directory.
 
@@ -346,6 +380,9 @@ def main() -> None:
     ap.add_argument("--no-degrade", dest="degrade", action="store_false",
                     help="train on the renders as they are. Measures what the "
                          "degradation augmentation is worth; do not ship it")
+    ap.add_argument("--balance-states", action="store_true",
+                    help="draw each state equally often; see "
+                         "state_balanced_sampler()")
     ap.add_argument("--selfcheck", action="store_true")
     args = ap.parse_args()
 
@@ -383,6 +420,7 @@ def main() -> None:
           f"degrade={'on' if args.degrade else 'OFF'}")
 
     train_ds = Plates(train_items, True, args.degrade)
+    sampler = state_balanced_sampler(train_items) if args.balance_states else None
     # The validation set is degraded too. Held-out CLEAN renders measure how
     # well the model reads clean renders, which is not the question.
     val_ds = Plates(val_items, True, args.degrade)
@@ -393,7 +431,8 @@ def main() -> None:
         import cv2
         cv2.setNumThreads(0)
 
-    train_ld = DataLoader(train_ds, batch_size=args.batch, shuffle=True,
+    train_ld = DataLoader(train_ds, batch_size=args.batch,
+                          shuffle=sampler is None, sampler=sampler,
                           num_workers=args.workers, collate_fn=collate,
                           drop_last=True, worker_init_fn=one_thread,
                           persistent_workers=args.workers > 0,
@@ -576,6 +615,20 @@ def _selfcheck() -> None:
         first = loss.item() if i == 0 else first
         last = loss.item()
     assert last < first * 0.9, f"loss did not fall: {first:.3f} -> {last:.3f}"
+
+    # The balancing weights. Getting these backwards would train HARDER on the
+    # state that is already 42% of the data, and the only symptom would be a
+    # model that reads MH even more often -- which looks like ordinary error.
+    from collections import Counter
+    items = [(Path("x.jpg"), t) for t in
+             ["MH01AB1234"] * 8 + ["OD05BQ2430"] * 2 + ["24BH9662FZ"]]
+    keys = [t[:2] if t[:2].isalpha() else "" for _, t in items]
+    n = Counter(keys)
+    w = [1.0 / n[k] for k in keys]
+    assert w[0] == 1 / 8 and w[8] == 1 / 2, w
+    assert sum(w[:8]) == sum(w[8:10]) == 1.0, \
+        "each state must contribute the same total draw weight"
+    assert w[10] == 1.0, "a BH plate has no state and pools on its own"
 
     print(f"selfcheck ok (loss {first:.2f} -> {last:.2f} in 30 steps)")
 
