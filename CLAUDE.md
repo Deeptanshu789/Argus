@@ -709,7 +709,8 @@ OCR silently reads nothing forever.
 | `ml/bench.py`, `ml/diagnose_video.py` | Per-stage timings, per-stage plate losses |
 | `test/smoke.ts` | 38 checks incl. a live end-to-end pipeline run |
 | Trained plate weights | Done — YOLO11s `plate-k12`, mAP50 0.974, 38/45 with PaddleOCR |
-| Trained reader weights | In service — CRNN `reader-k12`, floor off, 25/45, precision 60% |
+| Reader in service | **PaddleOCR** — 38/45, precision 95%, 4/5 on real video |
+| Trained reader weights | On disk, `ARGUS_READER=runs/reader-k12/best.pt` — 25/45, 60% |
 | `src/app/(dashboard)` | Done — live, map, analytics, search, upload, devices |
 | Real traffic footage | Upload it at `/upload` — no code change needed |
 

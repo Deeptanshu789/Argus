@@ -876,11 +876,22 @@ def apply_thread_limit() -> None:
 #   runs/reader-k12/best.pt   3.17M params, 60 epochs Kaggle, 178,266 samples
 #   PaddleOCR                 ARGUS_READER=paddle; 39/45, precision 95%
 #
-# reader-ft is the default because it is the one being tested against the
-# YOLO11s detector. Measurements for the pair live in CLAUDE.md; re-measure
-# BOTH sides whenever either changes, because a detector that crops differently
-# changes what the reader sees.
-_READER_DEFAULT = "runs/reader-k12/best.pt"
+# PADDLEOCR IS THE DEFAULT, paired with the trained runs/detect/plate-k12
+# detector. Both CRNNs lose to it on every measurement taken, and the reason is
+# not character recognition -- it is that PaddleOCR's text detector finds no
+# line in an unreadable crop and returns nothing, while a CTC softmax over 37
+# classes always has an argmax.
+#
+# The failure modes are what decide this, not the totals. On real footage
+# PaddleOCR's mistakes are "?plate", "?BINI", "?lo PHARMACY" -- signage and
+# noise that correct_plate() rejects, so none of it reaches the database. The
+# CRNN's mistakes are MH03CO0437 and MH21N1111: grammatical registrations that
+# are accepted, stored, and handed to Module C's layer 1 as match evidence. One
+# is visible; the other is a false trajectory.
+#
+# Set ARGUS_READER to a checkpoint to put a CRNN back. Both are on disk and
+# both stay measured in CLAUDE.md.
+_READER_DEFAULT = ""
 READER_WEIGHTS = os.environ.get("ARGUS_READER", _READER_DEFAULT) or None
 if READER_WEIGHTS == "paddle" or not os.path.exists(READER_WEIGHTS or ""):
     READER_WEIGHTS = None

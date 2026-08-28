@@ -125,7 +125,12 @@ fi
 # default has already moved once between trained readers, and a copy of it in
 # this script would go on reporting a healthy deploy for the wrong file.
 READER=$(sed -n 's/^_READER_DEFAULT = "\(.*\)"$/\1/p' ml/sidecar.py)
-if [ -f "$READER" ]; then
+if [ -z "$READER" ]; then
+  # Empty is a CHOICE, not an omission: PaddleOCR is the shipped reader and it
+  # comes from pip, not from runs/. Reporting a missing file here would send
+  # somebody hunting for weights that are deliberately not there.
+  echo "reader: PaddleOCR (no checkpoint needed)"
+elif [ -f "$READER" ]; then
   echo "$READER present"
 else
   echo "  NOTE: no trained reader; the sidecar will fall back to PaddleOCR."
