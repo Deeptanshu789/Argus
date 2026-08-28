@@ -438,8 +438,15 @@ async function pipelineSuite() {
         if (line.includes("[MATCH]")) { matched++; console.log(`  ${line.trim()}`); }
       }
     });
-    setTimeout(() => { w.kill("SIGINT"); setTimeout(() => { w.kill("SIGKILL"); resolve(); }, 1500); },
-      seconds * 1000);
+    // Resolve when the process is actually GONE, not 1.5s after the signal.
+    // SIGKILL leaves whatever the worker was writing in flight, and the
+    // replay check then counts that straggler as a duplicate. SIGINT lets it
+    // finish; the kill is only the backstop for a worker that ignores it.
+    w.on("exit", () => resolve());
+    setTimeout(() => {
+      w.kill("SIGINT");
+      setTimeout(() => w.kill("SIGKILL"), 8000);
+    }, seconds * 1000);
     void matched;
   });
 
@@ -455,11 +462,17 @@ async function pipelineSuite() {
    */
   const settled = async () => {
     let prev = await counts();
-    for (let i = 0; i < 10; i++) {
+    let stable = 0;
+    for (let i = 0; i < 20; i++) {
       await new Promise((r) => setTimeout(r, 1000));
       const now = await counts();
-      if (now.m === prev.m && now.t === prev.t) return now;
+      // THREE agreeing reads, not two. A single quiet second is not proof the
+      // writes have drained: the suite failed with "203834 -> 203835" on a run
+      // where the counts had already held still for a second before the last
+      // straggler landed.
+      stable = now.m === prev.m && now.t === prev.t ? stable + 1 : 0;
       prev = now;
+      if (stable >= 3) return now;
     }
     return prev;
   };
