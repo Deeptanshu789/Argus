@@ -79,6 +79,29 @@ SELECT create_hypertable('detections', 'ts', chunk_time_interval => INTERVAL '1 
 CREATE INDEX IF NOT EXISTS det_cam_ts ON detections (camera_id, ts DESC);
 CREATE INDEX IF NOT EXISTS det_track_ts ON detections (track_id, ts);
 
+-- This table is the only one in the schema that grows without bound: five rows
+-- per second per camera, forever. Measured on the development box it reached
+-- 4.98 million rows and 1.28 GB in a few days of intermittent running, which on
+-- a small VPS ends with Postgres refusing writes and the demo dying mid-run.
+--
+-- Seven days of raw per-frame boxes, then the chunk is dropped. Nothing else
+-- goes with it: `tracks`, `trajectories`, `matches` and the `analytics` rollup
+-- are separate tables written once per track or per bucket, so a journey
+-- stitched last month still reads back in full -- only the frame-by-frame boxes
+-- behind it age out, and nothing in the application reads those after the track
+-- has closed.
+--
+-- Wrapped because add_retention_policy is a TimescaleDB Community function. An
+-- Apache-only build has the hypertable but not the policy, and `npm run db:setup`
+-- must stay runnable there rather than failing on its last statement.
+DO $$
+BEGIN
+    PERFORM add_retention_policy('detections', INTERVAL '7 days', if_not_exists => TRUE);
+EXCEPTION WHEN undefined_function OR feature_not_supported THEN
+    RAISE NOTICE 'no retention policy: this TimescaleDB build has no add_retention_policy. '
+                 'Prune detections another way before the disk fills.';
+END $$;
+
 -- ------------------------------------------------------------ cross-camera --
 
 -- The differentiator. One row per confirmed same-vehicle match between two

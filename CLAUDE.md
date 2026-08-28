@@ -38,7 +38,7 @@ worker/ingest.ts    ▼   spawns + restarts sidecars, validates against contract
 server.ts           ▼   ONE process: Next UI + /api handlers + /ws upgrade
   src/server/association.ts   Module C ★ (cross-camera, 3-layer)
   src/server/analytics.ts     Module D
-  src/app/(dashboard)         Module E — six views (deck.gl, MapLibre, Recharts)
+  src/app/(dashboard)         Module E — six views (deck.gl, hand-drawn SVG)
   src/server/frames.ts        phone JPEG in, MJPEG out for the sidecar
 ```
 
@@ -656,6 +656,24 @@ safe to re-run.
 The API validates each response against its zod schema **on the way out**. A
 parse costs microseconds and turns "the dashboard renders blank" into a named
 field in the server log.
+
+### `detections` is the only table that grows without bound
+
+Five rows per second per camera, forever. Left alone it reached **4.98 million
+rows and 1.28 GB** on this machine in a few days of intermittent running, which
+on a small VPS ends with Postgres refusing writes mid-demo. `db/schema.sql`
+therefore carries a **seven-day retention policy** on that hypertable.
+
+Nothing else goes with it. `tracks`, `trajectories`, `matches` and the
+`analytics` rollup are separate tables written once per track or per bucket, so
+a journey stitched last month still reads back in full — only the frame-by-frame
+boxes behind it age out, and nothing in the application reads those once the
+track has closed.
+
+The call is wrapped in a `DO` block because `add_retention_policy` is a
+TimescaleDB **Community** function: an Apache-only build has the hypertable but
+not the policy, and `npm run db:setup` has to stay runnable there rather than
+failing on its last statement. It raises a notice instead.
 
 ## Timestamps carry milliseconds
 
