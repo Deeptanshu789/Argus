@@ -8,7 +8,7 @@
  */
 import { useCallback, useEffect, useState } from "react";
 import { search as searchApi, getCameras } from "@/lib/api";
-import { Empty, Panel, T, Tag, ago, methodColour } from "@/components/ui";
+import { Empty, Layers, MONO, Panel, T, Tag, ago, methodColour } from "@/components/ui";
 import { usePoll } from "@/components/useLive";
 import type { SearchResult } from "@/contract";
 
@@ -124,9 +124,11 @@ export default function SearchView() {
                         <span key={i} style={{ display: "flex", alignItems: "center",
                                                gap: ".35rem", fontSize: 12 }}>
                           {i === 0 && <code>{h.from_camera}</code>}
-                          <Tag colour={methodColour(h.method)}>
-                            {h.method} {h.confidence.toFixed(2)} · {h.travel_time_s}s
-                          </Tag>
+                          <Layers method={h.method} />
+                          <span className="tnum" style={{ fontFamily: MONO, fontSize: 11,
+                                                          color: methodColour(h.method) }}>
+                            {h.confidence.toFixed(2)} · {h.travel_time_s}s
+                          </span>
                           <code>{h.to_camera}</code>
                         </span>
                       )) : <Empty>Single camera — no cross-camera hop.</Empty>}

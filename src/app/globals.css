@@ -1,0 +1,125 @@
+/*
+ * Design tokens for the Argus control room.
+ *
+ * These are the ONLY place a colour is written down. src/components/ui.tsx's
+ * `T` maps every key onto one of these variables, and every view styles itself
+ * through `T`, so the whole application re-themes from this file alone.
+ *
+ * Two complete palettes, and the dark one is not an inversion of the light one:
+ * a control room runs either, and an operator reading plate text at 3am needs
+ * the same contrast the daytime shift gets. Light is warm paper, dark is cool
+ * slate, and the semantic scale (ok/info/warn/crit) is deliberately separate
+ * from the accent hue -- alert severity and match confidence are different
+ * dimensions and must never share a colour.
+ */
+
+:root {
+  --bg: #f3f2ef;
+  --panel: #fbfaf8;
+  --panel2: #edebe6;
+  --sunk: #e6e4de;
+  --line: #e1ded7;
+  --line2: #c6c2b8;
+  --ink: #191917;
+  --ink2: #5a5751;
+  --ink3: #8f8b83;
+  --accent: #3b4a63;
+  --accentSoft: rgba(59, 74, 99, 0.10);
+  --ok: #4c7a5a;
+  --info: #3a6ea5;
+  --warn: #a8761f;
+  --crit: #a83a2c;
+  --okBg: rgba(76, 122, 90, 0.13);
+  --infoBg: rgba(58, 110, 165, 0.13);
+  --warnBg: rgba(168, 118, 31, 0.15);
+  --critBg: rgba(168, 58, 44, 0.13);
+  /* Ramp for congestion and confidence. Seven steps, cool to hot. */
+  --r1: #5b8f9c;
+  --r2: #9cbcb6;
+  --r3: #cbd6cc;
+  --r4: #e9deba;
+  --r5: #e2b878;
+  --r6: #d0803f;
+  --r7: #a83a2c;
+  --rowpad: 9px;
+  --shadow: 0 1px 2px rgba(25, 25, 23, 0.05), 0 10px 26px -14px rgba(25, 25, 23, 0.18);
+}
+
+/* An explicit choice wins over the OS in both directions, which is why the
+ * toggle stamps data-theme rather than relying on prefers-color-scheme. */
+html[data-theme="dark"] {
+  --bg: #111317;
+  --panel: #171a1e;
+  --panel2: #1f232a;
+  --sunk: #0d0f12;
+  --line: #272c33;
+  --line2: #3a414a;
+  --ink: #e9e7e2;
+  --ink2: #a3a19b;
+  --ink3: #6c6a65;
+  --accent: #93a9c6;
+  --accentSoft: rgba(147, 169, 198, 0.14);
+  --ok: #6fae83;
+  --info: #71a5d8;
+  --warn: #d0a24d;
+  --crit: #d76a5b;
+  --okBg: rgba(111, 174, 131, 0.15);
+  --infoBg: rgba(113, 165, 216, 0.15);
+  --warnBg: rgba(208, 162, 77, 0.16);
+  --critBg: rgba(215, 106, 91, 0.16);
+  --r1: #4a7d8a;
+  --r2: #7ba39d;
+  --r3: #8f9b92;
+  --r4: #b9a878;
+  --r5: #c79a58;
+  --r6: #bc6f34;
+  --r7: #a8402f;
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.45), 0 12px 30px -16px rgba(0, 0, 0, 0.7);
+}
+
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: "IBM Plex Sans", system-ui, sans-serif;
+  overflow-x: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--ink); text-decoration: underline; }
+::selection { background: var(--accentSoft); }
+
+input, button, textarea, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+
+/* Digits that line up in a column must be the same width, or a table of plate
+ * confidences reads as ragged noise instead of a scale. */
+.tnum { font-variant-numeric: tabular-nums; }
+
+/* A plate is the primary identifier in this system. It gets one treatment,
+ * everywhere, so the eye can find it without reading the surrounding label. */
+.plate {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.02em;
+}
+
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--line2); border-radius: 99px; }
+
+@keyframes apulse { 0%, 100% { opacity: 1 } 50% { opacity: .2 } }
+@keyframes aslide { 0% { transform: translateY(7px); opacity: 0 } 100% { transform: translateY(0); opacity: 1 } }
+@keyframes asweep { 0% { transform: translateX(-110%) } 100% { transform: translateX(360%) } }
+@keyframes aspin { 100% { transform: rotate(360deg) } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -10,7 +10,7 @@
 import { use, useState } from "react";
 import Link from "next/link";
 import { cancelUpload, getUpload } from "@/lib/api";
-import { Empty, Panel, T, Tag, ago, methodColour } from "@/components/ui";
+import { Empty, Layers, Panel, T, Tag, ago, methodColour } from "@/components/ui";
 import { usePoll } from "@/components/useLive";
 import type { Upload } from "@/contract";
 
@@ -132,6 +132,7 @@ export default function UploadResultView({ params }: { params: Promise<{ id: str
                   <span key={i} style={{ display: "flex", alignItems: "center",
                                          gap: ".35rem", fontSize: 12 }}>
                     {i === 0 && <code>{byCamera.get(h.from_camera) ?? h.from_camera}</code>}
+                    <Layers method={h.method} />
                     <Tag colour={methodColour(h.method)}>
                       {h.method} {h.confidence.toFixed(2)} · {h.travel_time_s}s
                     </Tag>

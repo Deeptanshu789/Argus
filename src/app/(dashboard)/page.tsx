@@ -10,7 +10,8 @@
  */
 import { useState } from "react";
 import { getAlerts, getCameras, ackAlert } from "@/lib/api";
-import { Dot, Empty, Panel, T, Tag, ago, methodColour, severityColour, statusColour }
+import { Dot, Empty, Layers, MONO, Panel, Plate, T, Tag, ago, methodColour,
+         severityColour, statusColour }
   from "@/components/ui";
 import { useLive, usePoll } from "@/components/useLive";
 import type { Alert, Camera } from "@/contract";
@@ -156,12 +157,12 @@ export default function LiveView() {
           {live.matches.length ? live.matches.slice(0, 8).map((m, i) => (
             <div key={i} style={{ padding: ".4rem 0", borderBottom: `1px solid ${T.line}` }}>
               <div style={{ display: "flex", alignItems: "center", gap: ".5rem" }}>
-                <strong style={{ fontSize: 13 }}>
-                  {m.plate_text ?? "unidentified"}
-                </strong>
-                <Tag colour={methodColour(m.method)}>
-                  {m.method} {m.confidence.toFixed(2)}
-                </Tag>
+                <Layers method={m.method} />
+                <Plate text={m.plate_text} />
+                <span className="tnum" style={{ fontFamily: MONO, fontSize: 11,
+                                                color: methodColour(m.method) }}>
+                  {m.confidence.toFixed(2)}
+                </span>
               </div>
               <div style={{ fontSize: 11, color: T.dim }}>
                 {m.from_camera} to {m.to_camera} in {m.travel_time_s}s
