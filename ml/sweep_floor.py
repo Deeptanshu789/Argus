@@ -27,9 +27,9 @@ HERE = Path(__file__).parent
 PY = sys.executable
 
 
-def score(floor: float, model: str | None, reader: str) -> dict[str, int]:
-    env = {**os.environ, "ARGUS_READER": reader,
-           "ARGUS_READER_MIN_CONF": str(floor)}
+def score(value: float, model: str | None, reader: str,
+          var: str) -> dict[str, int]:
+    env = {**os.environ, "ARGUS_READER": reader, var: str(value)}
     cmd = [PY, str(HERE / "score_plates.py")]
     if model:
         cmd += ["--model", model]
@@ -53,15 +53,22 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--reader", default="runs/reader-k12/best.pt")
     ap.add_argument("--model", default=None, help="plate detector weights")
-    ap.add_argument("--floors", default="0.0,0.80,0.85,0.90,0.93,0.95,0.97,0.99")
+    ap.add_argument("--floors", default="0.0,0.80,0.85,0.90,0.93,0.95,0.97,0.99",
+                    help="values to try")
+    # One script, because the two knobs are measured the same way: set an
+    # environment variable, run the real scorer, read correct/wrong/missed.
+    # A second copy of this loop would be a second place for the parsing to
+    # rot when score_plates.py changes its layout.
+    ap.add_argument("--var", default="ARGUS_READER_MIN_CONF",
+                    help="environment variable to sweep")
     args = ap.parse_args()
 
     floors = [float(f) for f in args.floors.split(",")]
-    print(f"reader: {args.reader}\n")
-    print(f"{'floor':>6}  {'correct':>7}  {'wrong':>5}  {'missed':>6}  {'precision':>9}")
+    print(f"reader: {args.reader}\nsweeping: {args.var}\n")
+    print(f"{'value':>6}  {'correct':>7}  {'wrong':>5}  {'missed':>6}  {'precision':>9}")
     rows = []
     for f in floors:
-        r = score(f, args.model, args.reader)
+        r = score(f, args.model, args.reader, args.var)
         answered = r["correct"] + r["wrong"]
         prec = r["correct"] / answered if answered else 0.0
         rows.append((f, r, prec))
@@ -70,7 +77,7 @@ def main() -> None:
 
     base = rows[0][1]["correct"]
     knee = max((r for r in rows if r[1]["correct"] >= base), key=lambda r: r[0])
-    print(f"\nhighest floor that keeps all {base} correct reads: {knee[0]:.3f} "
+    print(f"\nhighest value that keeps all {base} correct reads: {knee[0]:.3f} "
           f"(precision {knee[2]:.0%}, was {rows[0][2]:.0%})")
 
 

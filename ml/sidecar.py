@@ -147,6 +147,67 @@ STATE_MAX_COST = 2
 RARE_STATES = {"DD", "DN", "LD", "LA", "PY", "CH", "SK", "MZ", "NL", "AR", "ML", "TR"}
 
 
+# How often each state code appears in the reader's own training crops
+# (datasets/reader-all/labels.txt, 6,638 labelled crops). Regenerate with
+# ml/state_prior.py after rebuilding the crop set.
+#
+# MH is 42% of it and OD is 0.4% -- a 97x gap between the commonest state and
+# the one the KIIT test footage was actually filmed in. A CRNN trained on that
+# does not merely prefer MH; on a crop it cannot read it emits MH, because the
+# prior IS what a classifier falls back on when the evidence is weak. Nothing
+# downstream can catch it: MH02DK1434 is a real registration format and
+# correct_plate() accepts it.
+STATE_PRIOR = {
+    "MH": 0.42347, "DL": 0.09265, "TN": 0.06403, "AP": 0.05393,
+    "UP": 0.05002, "WB": 0.04022, "HR": 0.03947, "KL": 0.03706,
+    "GJ": 0.03435, "KA": 0.02621, "PB": 0.01748, "HP": 0.01145,
+    "JK": 0.01055, "ML": 0.00979, "RJ": 0.00949, "MP": 0.00904,
+    "TS": 0.00829, "AS": 0.00738, "JH": 0.00633, "PY": 0.00633,
+    "CG": 0.00588, "BR": 0.00467, "SK": 0.00452, "OD": 0.00437,
+    "GA": 0.00407, "CH": 0.00392, "TR": 0.00331, "DN": 0.00286,
+    "UK": 0.00286, "AR": 0.00226, "NL": 0.00181, "MN": 0.00136,
+    "MZ": 0.00030, "LA": 0.00015, "LD": 0.00015,
+}
+# A state the training set never showed is not impossible, only unevidenced.
+# Give it the rarest observed frequency rather than zero, which would make its
+# prior correction infinite and hand every unreadable crop to whichever state
+# happens to be missing.
+STATE_PRIOR_FLOOR = min(STATE_PRIOR.values())
+
+# Logit adjustment strength. 0.0 leaves the model's own preference alone; 1.0
+# divides the prior out completely, which asks a reader trained on Maharashtra
+# to treat MH and MZ as equally likely and overshoots the other way -- real
+# traffic is not uniform across states either. Swept with ml/sweep_state.py.
+STATE_PRIOR_TAU = float(os.environ.get("ARGUS_STATE_PRIOR_TAU", "0.0"))
+
+
+def best_state(p0: dict[str, float], p1: dict[str, float],
+               tau: float) -> str | None:
+    """Likeliest real state code once the training prior is divided out.
+
+    p0 and p1 map each character to the model's probability for it at the two
+    positions. Score is log p(first) + log p(second) - tau * log prior(code),
+    which is logit adjustment: at tau=0 it returns the model's own argmax pair
+    restricted to real codes, and at tau=1 the prior is removed entirely and a
+    state seen 2,811 times competes with one seen once on evidence alone.
+
+    Model-free on purpose, so the arithmetic that decides which state a plate
+    claims can be checked without loading a 3.17M-parameter network.
+    """
+    import math
+    eps = 1e-12
+    best: tuple[str, float] | None = None
+    for code in STATE_CODES:
+        a, b = p0.get(code[0]), p1.get(code[1])
+        if a is None or b is None:
+            continue
+        prior = STATE_PRIOR.get(code, STATE_PRIOR_FLOOR)
+        val = math.log(a + eps) + math.log(b + eps) - tau * math.log(prior)
+        if best is None or val > best[1]:
+            best = (code, val)
+    return best[0] if best else None
+
+
 def _state_code(pair: str) -> tuple[str, int] | None:
     """Best real state code for two characters, or None.
 
@@ -863,6 +924,49 @@ class CrnnReader:
               f"(held-out exact {ckpt.get('accuracy', 0) * 100:.1f}%, "
               f"epoch {ckpt.get('epoch', '?')})", file=sys.stderr)
 
+    def _rerank_state(self, logits, text: str) -> str:
+        """Re-choose the two state letters with the training prior divided out.
+
+        The greedy CTC path takes the argmax at every step, and the argmax at
+        the state positions is dominated by the training distribution: 42% of
+        the crops are MH, so MH is what weak evidence decodes to. The visual
+        evidence for those two characters is still in the logits -- greedy just
+        threw it away in favour of one reading.
+
+        Score every real state code by its own two characters and subtract
+        tau * log(prior). tau=0 is the greedy answer unchanged, tau=1 removes
+        the prior entirely. Only the first two emitted characters move; the
+        district digits and series letters have no closed set to check against
+        and are left exactly as decoded.
+        """
+        # Only a plate that already reads as a state code is re-ranked. A BH
+        # series registration starts with two DIGITS -- 24BH9662FZ -- and
+        # rewriting those to the likeliest state would destroy a plate the
+        # model read correctly. PLATE_FORMATS accepts both shapes, so nothing
+        # downstream would notice.
+        if STATE_PRIOR_TAU <= 0 or len(text) < 2 or not text[:2].isalpha():
+            return text
+
+        # The timesteps that emitted characters, in order. Recomputed rather
+        # than returned by decode(), so train_reader.decode() stays the one
+        # definition of the greedy path and cannot drift from this.
+        probs = logits.softmax(-1)[0]
+        best = probs.argmax(-1).tolist()
+        steps, prev = [], self._mod.BLANK
+        for t, k in enumerate(best):
+            if k != prev and k != self._mod.BLANK:
+                steps.append(t)
+            prev = k
+        if len(steps) < 2:
+            return text
+
+        stoi = self._mod.STOI
+        p0, p1 = probs[steps[0]].tolist(), probs[steps[1]].tolist()
+        code = best_state({c: p0[i] for c, i in stoi.items()},
+                          {c: p1[i] for c, i in stoi.items()},
+                          STATE_PRIOR_TAU)
+        return code + text[2:] if code else text
+
     def predict(self, image):
         import cv2
         import numpy as np
@@ -878,6 +982,7 @@ class CrnnReader:
         text = self._mod.decode(logits)[0]
         if not text:
             return []
+        text = self._rerank_state(logits, text)
 
         # Confidence over the steps that actually EMITTED a character -- the
         # blanks between characters are usually near-certain and would drag any
@@ -1389,6 +1494,19 @@ def _selfcheck() -> None:
     assert _state_code("0D")[0] == "OD"
     assert _state_code("O0")[0] == "OD"
     assert _state_code("05") is None, "no state code is reachable, so none is invented"
+
+    # The prior correction. MH is 42% of the training crops and OD is 0.4%, so
+    # at tau=0 a near-tie goes to MH on prior alone; dividing the prior out has
+    # to be able to overturn that, and must not overturn a clear reading.
+    tie0 = {"M": 0.40, "O": 0.38}
+    tie1 = {"H": 0.40, "D": 0.38}
+    assert best_state(tie0, tie1, 0.0) == "MH", "at tau=0 the model's own answer stands"
+    assert best_state(tie0, tie1, 1.0) == "OD", "at tau=1 the rarer state wins a near-tie"
+    clear = ({"M": 0.97, "O": 0.01}, {"H": 0.97, "D": 0.01})
+    assert best_state(*clear, 1.0) == "MH", \
+        "strong evidence must survive the correction, or every plate becomes rare"
+    assert best_state({"Z": 1.0}, {"Z": 1.0}, 0.0) is None, \
+        "given no probability for any real code's letters, invent nothing"
     assert correct_plate("0033AU6001")[0] == "OD33AU6001"
     # A repaired plate must report LOWER confidence than a clean one.
     assert correct_plate("0033AU6001")[1] > correct_plate("OD33AU6001")[1]
