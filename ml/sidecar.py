@@ -820,9 +820,16 @@ if READER_WEIGHTS == "paddle" or not os.path.exists(READER_WEIGHTS or ""):
 # be tried at all. The floor does not only discard junk -- it un-blocks a retry
 # that was already there.
 #
-# ARGUS_READER_MIN_CONF overrides it; 0.0 restores answer-everything, which is
-# what the sweep needs and what every pre-floor measurement was taken with.
-READER_MIN_CONF = float(os.environ.get("ARGUS_READER_MIN_CONF", "0.99"))
+# THE DEFAULT IS 0.0 -- the floor is OFF, and the reader answers every crop.
+# That is a deliberate choice against the table above, taken because a filled
+# dashboard is what this build is being shown on: at 0.99 only 2 of 154 crops
+# from real video clear the floor, and an operator watching traffic sees almost
+# no plates at all. The cost is the table's first row -- 17 wrong reads to 3,
+# and 4 correct ones lost to the retry that the floor un-blocks.
+#
+# Set ARGUS_READER_MIN_CONF=0.99 to switch it back on for anything measured,
+# and note that every accuracy number in CLAUDE.md above assumes it is on.
+READER_MIN_CONF = float(os.environ.get("ARGUS_READER_MIN_CONF", "0.0"))
 
 
 class CrnnReader:

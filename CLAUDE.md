@@ -382,6 +382,15 @@ PaddleOCR is still ahead (38 correct, 95%, and 4 of 5 on the video). The gap is
 now reading ability rather than restraint, which is the gap more real crops
 close.
 
+**The floor ships OFF — `READER_MIN_CONF` defaults to 0.0.** At 0.99 only 2 of
+154 crops from real video clear it, so a dashboard of live traffic shows almost
+no plates, and being shown is what this build is for. The trade is the whole
+first row of that table: 17 wrong reads instead of 3, 25 correct instead of 29,
+and 114 invented plates instead of 0 on the KIIT clip.
+
+Set `ARGUS_READER_MIN_CONF=0.99` before quoting any accuracy number. Every
+figure in this section was measured with the floor on.
+
 Eight epochs on under two thousand crops moved it from nothing to a third, and
 the remaining errors became near-misses (`ML10B9306` -> `ML10B9308`). The
 binding constraint is the amount of real data, not the architecture: 1,756
@@ -653,7 +662,7 @@ OCR silently reads nothing forever.
 | `ml/bench.py`, `ml/diagnose_video.py` | Per-stage timings, per-stage plate losses |
 | `test/smoke.ts` | 38 checks incl. a live end-to-end pipeline run |
 | Trained plate weights | Done — YOLO11s `plate-k12`, mAP50 0.974, 38/45 with PaddleOCR |
-| Trained reader weights | In service — CRNN `reader-k12` + 0.99 floor, 29/45, precision 91% |
+| Trained reader weights | In service — CRNN `reader-k12`, floor off, 25/45, precision 60% |
 | `src/app/(dashboard)` | Done — live, map, analytics, search, upload, devices |
 | Real traffic footage | Upload it at `/upload` — no code change needed |
 
