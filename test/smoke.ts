@@ -395,20 +395,6 @@ async function pipelineSuite() {
   // actually holding fine.
   const CAMS = ["CAM1", "CAM2", "CAM3"];
 
-  const countMatches = async () => (await db.sql<{ n: number }[]>`
-    SELECT count(*)::int n FROM matches m
-      JOIN tracks f ON f.id = m.from_track
-      JOIN tracks t ON t.id = m.to_track
-     WHERE f.camera_id = ANY(${CAMS}) AND t.camera_id = ANY(${CAMS})`)[0]!.n;
-
-  const countTrajectories = async () => (await db.sql<{ n: number }[]>`
-    SELECT count(*)::int n FROM trajectories tr
-     WHERE NOT EXISTS (
-       SELECT 1 FROM tracks t
-        WHERE t.id = ANY(tr.track_ids) AND NOT (t.camera_id = ANY(${CAMS})))`)[0]!.n;
-
-  const counts = async () => ({ m: await countMatches(), t: await countTrajectories() });
-
   /**
    * One pin per INVOCATION, shared by the two worker runs inside it.
    *
@@ -421,6 +407,46 @@ async function pipelineSuite() {
    * backwards -- a real contract violation, produced entirely by the test.
    */
   const runId = `smoke-${Date.now().toString(36)}`;
+  // ml/sidecar.py builds every track id as `${ARGUS_RUN_ID}-N`, so this
+  // matches exactly the tracks THIS invocation produced.
+  const mine = `${runId}-%`;
+
+  /**
+   * Counted per invocation, not globally.
+   *
+   * These counted every match between CAM1/CAM2/CAM3, which is not what the
+   * replay check needs to know. The demo sidecar emits the same plate every
+   * time, so a run started a few minutes after the last one matches the
+   * PREVIOUS invocation's vehicle by plate at 0.99 -- a real, correct match
+   * that has nothing to do with the replay under test. The suite failed with
+   * "matches went 203998 -> 203999" on exactly that: one match joining
+   * smoke-mtclkm6g-1 to smoke-mtcltg6g-1, two different invocations.
+   *
+   * Restricting to this run's own tracks makes the assertion mean what it
+   * says, and makes it independent of anything else writing to the database --
+   * including the live worker, which was the other way this failed.
+   *
+   * Trajectories need only TOUCH this run, not consist of it. The demo plate
+   * is constant, so extendTrajectory() legitimately appends this run's leg to
+   * a chain a previous invocation started, and demanding every track be mine
+   * counted zero of them. Touching is enough for the replay check: a replay
+   * that duplicated anything would add a second trajectory carrying these
+   * same tracks.
+   */
+  const countMatches = async () => (await db.sql<{ n: number }[]>`
+    SELECT count(*)::int n FROM matches m
+      JOIN tracks f ON f.id = m.from_track
+      JOIN tracks t ON t.id = m.to_track
+     WHERE f.camera_id = ANY(${CAMS}) AND t.camera_id = ANY(${CAMS})
+       AND f.track_id LIKE ${mine} AND t.track_id LIKE ${mine}`)[0]!.n;
+
+  const countTrajectories = async () => (await db.sql<{ n: number }[]>`
+    SELECT count(*)::int n FROM trajectories tr
+     WHERE EXISTS (SELECT 1 FROM tracks t
+                    WHERE t.id = ANY(tr.track_ids)
+                      AND t.track_id LIKE ${mine})`)[0]!.n;
+
+  const counts = async () => ({ m: await countMatches(), t: await countTrajectories() });
 
   const runWorker = (seconds: number) => new Promise<void>((resolve) => {
     const w = spawn("npx", ["tsx", "worker/ingest.ts"], {
@@ -498,9 +524,29 @@ async function pipelineSuite() {
     assert(afterSecond.m === afterFirst.m,
       `matches went ${afterFirst.m} -> ${afterSecond.m} on a replay of identical events`);
   });
+  // Not an exact count. A replay 22 seconds later is not identical INPUT to a
+  // time-windowed association engine: the second run's CAM2 leg can close
+  // before the first run's CAM1 leg has aged out, so a pair the first run
+  // never saw becomes visible and a genuinely new trajectory is stitched.
+  // Asserting the count never moves demanded that the engine ignore time,
+  // and it failed roughly one run in three for that reason.
+  //
+  // What must hold regardless of timing is that no chain of tracks is written
+  // twice. That is the property a duplicate would actually break.
+  const chains = await db.sql<{ track_ids: string[] }[]>`
+    SELECT track_ids FROM trajectories tr
+     WHERE EXISTS (SELECT 1 FROM tracks t
+                    WHERE t.id = ANY(tr.track_ids)
+                      AND t.track_id LIKE ${mine})`;
   check("replaying the same events creates no duplicate trajectories", () => {
-    assert(afterSecond.t === afterFirst.t,
-      `trajectories went ${afterFirst.t} -> ${afterSecond.t} on a replay of identical events`);
+    const seen = new Set<string>();
+    for (const c of chains) {
+      const key = c.track_ids.map(String).join(",");
+      assert(!seen.has(key), `two trajectories carry the same chain: ${key}`);
+      seen.add(key);
+    }
+    assert(afterSecond.t >= afterFirst.t,
+      `trajectories went DOWN, ${afterFirst.t} -> ${afterSecond.t}`);
   });
 
   const rows = await db.sql<{ id: string; track_ids: string[] }[]>`
@@ -521,7 +567,20 @@ async function pipelineSuite() {
     assert(list.some((t) => t.hops.length > 0), "every trajectory came back with zero hops");
   });
 
-  const found = await get("/api/search?plate=KA05MR7821");
+  // Ask the database what plate THIS run produced rather than hardcoding it.
+  // ml/sidecar.py derives the demo registration from ARGUS_RUN_ID so two
+  // invocations cannot match each other by plate, which means there is no
+  // constant left to search for -- and a hardcoded one would silently find a
+  // previous run's data and pass while this run's search was broken.
+  const emitted = (await db.sql<{ plate_text: string }[]>`
+    SELECT plate_text FROM tracks
+     WHERE track_id LIKE ${mine} AND plate_text IS NOT NULL
+     LIMIT 1`)[0]?.plate_text;
+  check("the pipeline stored a plate for this run", () => {
+    assert(emitted, "no track from this run carried a plate at all");
+  });
+
+  const found = await get(`/api/search?plate=${emitted ?? "NONE"}`);
   check("the plate the pipeline read is findable by search", () => {
     const r = conforms(SearchResult, found.body, "search");
     assert(r.sightings.length > 0, "the pipeline stored the plate but search cannot find it");

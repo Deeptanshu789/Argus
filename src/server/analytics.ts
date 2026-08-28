@@ -119,10 +119,20 @@ export function congestionScore(
  * detection rows: at 5 FPS one vehicle produces dozens of rows, and counting
  * those would report a car park as a motorway.
  */
+/**
+ * Width of one analytics bucket, in seconds.
+ *
+ * Exported because src/server/db.ts reduces detections to the first and last
+ * row of each (bucket, track) IN SQL before this function ever sees them. That
+ * reduction is only equivalent to bucketing the raw rows if both halves agree
+ * on the boundary, so there is one constant and not two literals.
+ */
+export const BUCKET_SECONDS = 300;
+
 export function bucketize(
   rows: readonly DetectionRow[],
   cal: CameraCalibration,
-  bucketSeconds = 300,
+  bucketSeconds = BUCKET_SECONDS,
 ): AnalyticsBucket[] {
   const buckets = new Map<number, DetectionRow[]>();
   for (const r of rows) {

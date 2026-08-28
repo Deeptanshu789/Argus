@@ -15,7 +15,10 @@ import type {
   Alert, AnalyticsResponse, Camera, CameraLink, Hop, MatchMethod,
   Device, SearchResult, Track, Trajectory, Upload, UploadResult, VehicleType,
 } from "@/contract";
-import { bucketize, type CameraCalibration, type DetectionRow } from "@/server/analytics";
+import {
+  BUCKET_SECONDS, bucketize,
+  type CameraCalibration, type DetectionRow,
+} from "@/server/analytics";
 
 export const DATABASE_URL =
   process.env.DATABASE_URL ?? "postgresql://argus:argus@localhost:5432/argus";
@@ -787,21 +790,52 @@ export async function activeDeviceSources(): Promise<
 export async function getAnalytics(
   camera?: string, hours = 6,
 ): Promise<AnalyticsResponse> {
+  // FIRST AND LAST ROW OF EACH (BUCKET, TRACK), NOT EVERY DETECTION.
+  //
+  // This selected every detection in the window and built a JS object for each
+  // one. At 5 fps across two cameras with a dozen vehicles in frame that is
+  // over a million objects for a six-hour window, and the server died of it:
+  // "FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out
+  // of memory", taking the UI and the WebSocket down with it. A dashboard
+  // endpoint must not have a memory cost that grows with how long the system
+  // has been running.
+  //
+  // The reduction is exact, not a sample. bucketize() needs three things from
+  // a bucket: how many distinct tracks it holds, each track's vehicle_type,
+  // and estimateSpeed(), which sorts a track's rows and uses ONLY the first
+  // and the last. Two rows per track per bucket carry all three, so the
+  // numbers are identical to reading every row -- and a track seen once in a
+  // bucket yields one row, which still makes estimateSpeed() return null the
+  // way it did before.
   const rows = await sql<{
     ts: Date; camera_id: string; track_id: string;
     bbox: number[]; vehicle_type: string | null;
   }[]>`
-    SELECT d.ts, d.camera_id, d.track_id, d.bbox, t.vehicle_type
-      FROM detections d
-      LEFT JOIN tracks t
-        ON t.camera_id = d.camera_id AND t.track_id = d.track_id
-     WHERE d.ts > now() - make_interval(hours => ${hours})
-       AND (${camera ?? null}::text IS NULL OR d.camera_id = ${camera ?? null})
-       -- City-wide analytics counts live cameras. Uploaded footage is reported
-       -- on its own page, and is included here only when asked for by name.
-       AND (${camera ?? null}::text IS NOT NULL
-            OR d.camera_id NOT IN (SELECT id FROM cameras WHERE is_upload))
-     ORDER BY d.ts`;
+    WITH windowed AS (
+      SELECT d.ts, d.camera_id, d.track_id, d.bbox, t.vehicle_type,
+             floor(extract(epoch FROM d.ts) / ${BUCKET_SECONDS}) AS bucket
+        FROM detections d
+        LEFT JOIN tracks t
+          ON t.camera_id = d.camera_id AND t.track_id = d.track_id
+       WHERE d.ts > now() - make_interval(hours => ${hours})
+         AND (${camera ?? null}::text IS NULL OR d.camera_id = ${camera ?? null})
+         -- City-wide analytics counts live cameras. Uploaded footage is
+         -- reported on its own page, and is included here only when asked
+         -- for by name.
+         AND (${camera ?? null}::text IS NOT NULL
+              OR d.camera_id NOT IN (SELECT id FROM cameras WHERE is_upload))
+    ), edges AS (
+      SELECT *,
+             row_number() OVER (PARTITION BY bucket, camera_id, track_id
+                                    ORDER BY ts)      AS first_rn,
+             row_number() OVER (PARTITION BY bucket, camera_id, track_id
+                                    ORDER BY ts DESC) AS last_rn
+        FROM windowed
+    )
+    SELECT ts, camera_id, track_id, bbox, vehicle_type
+      FROM edges
+     WHERE first_rn = 1 OR last_rn = 1
+     ORDER BY ts`;
 
   const cal = await getCalibration();
   const detections: DetectionRow[] = rows.map((r) => ({
@@ -823,7 +857,7 @@ export async function getAnalytics(
     ? cals.reduce((s, c) => s + c.metersPerPixel, 0) / cals.length
     : 0.05;
 
-  const series = bucketize(detections, { metersPerPixel: mpp });
+  const series = bucketize(detections, { metersPerPixel: mpp }, BUCKET_SECONDS);
   const speeds = series.map((b) => b.avg_speed_kmh).filter((s): s is number => s !== null);
 
   return {

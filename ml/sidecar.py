@@ -418,7 +418,34 @@ def _parse_plate(s: str) -> tuple[str, int] | None:
 # CAM2, and each sidecar staggers its output so the worker sees the legs in the
 # order real event timing would deliver them.
 DEMO_ROUTE = ["CAM1", "CAM3", "CAM2", "CAM4"]
-DEMO_PLATE = "KA05MR7821"
+
+
+def _demo_plate() -> str:
+    """The synthetic vehicle's registration, DERIVED FROM RUN_ID.
+
+    A constant here made every demo run the same vehicle, so a run started
+    minutes after the last one matched the PREVIOUS run's tracks by plate at
+    0.99 -- a real, correct match between two unrelated runs. test/smoke.ts
+    replays the same events twice and asserts nothing new is created, and that
+    assertion failed intermittently for exactly this reason: the second run
+    matched the first run of an earlier invocation still inside the association
+    window.
+
+    RUN_ID already isolates track ids. The plate has to be isolated too, or
+    layer 1 reaches straight across the boundary that RUN_ID was drawn to
+    create. Keep the format valid: correct_plate() must accept it, or the
+    demo stops exercising the path it exists to exercise.
+    """
+    h = 0x811C9DC5                                # FNV-1a, so that two run ids
+    for ch in RUN_ID:                            # differing in one character
+        h = ((h ^ ord(ch)) * 0x01000193) & 0xFFFFFFFF   # do not collide
+    letters = "ABCDEFGHJKLMNPQRSTUVWXYZ"          # no I or O, which OCR confuses
+    return (f"KA{h % 90 + 10:02d}"
+            f"{letters[h >> 8 & 0x17]}{letters[h >> 13 & 0x17]}"
+            f"{h % 9000 + 1000:04d}")
+
+
+DEMO_PLATE = _demo_plate()
 
 
 # The REAL tracker emits 64 floats, not 512 -- BoT-SORT's `model: auto` encoder
