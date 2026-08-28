@@ -20,7 +20,11 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from sidecar import correct_plate, make_reader
+from sidecar import (
+    PLATE_CONF, PLATE_IMGSZ, PLATE_MIN_VEHICLE_PX, VEHICLE_CLASSES,
+    VEHICLE_CONF, VEHICLE_IMGSZ, VEHICLE_WEIGHTS,
+    _pad, _read_plate, correct_plate, find_plate_weights, make_reader,
+)
 
 IMG_EXT = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 VID_EXT = {".mp4", ".avi", ".mov", ".mkv", ".webm"}
@@ -35,18 +39,140 @@ def _warn_once(msg: str) -> None:
         print(f"warning: {msg}")
 
 
+
+def pipeline_video(src: Path, dst: Path, args) -> None:
+    """Annotate a clip the way ml/sidecar.py actually sees it.
+
+    The default mode of this script runs the plate detector straight at the
+    frame, which is the right check on a still photograph and is NOT what the
+    system does. `run()` detects vehicles, tracks them, and only then looks for
+    a plate INSIDE a vehicle box -- so a demo that skips the vehicle stage
+    cannot show why a plate was missed, and cannot show a plate being attached
+    to a tracked vehicle at all.
+
+    Reading goes through sidecar._read_plate(), the same function the sidecar
+    calls, so the text drawn here is the text that would reach the database.
+    The plate box is found once and handed on as an already-cropped region, so
+    the detector is not run twice on the same crop just to draw a rectangle.
+    """
+    import cv2
+    from ultralytics import YOLO
+
+    vehicle = YOLO(VEHICLE_WEIGHTS)
+    plate_path = pick_model(args.model)
+    plate = YOLO(plate_path)
+    reader = make_reader() if args.ocr else None
+    print(f"vehicles: {VEHICLE_WEIGHTS}   plates: {plate_path}")
+
+    cap = cv2.VideoCapture(str(src))
+    if not cap.isOpened():
+        sys.exit(f"cannot decode video: {src}")
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30
+    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    step = max(1, round(fps / 5))
+    writer = cv2.VideoWriter(str(dst), cv2.VideoWriter_fourcc(*"mp4v"),
+                             fps / step, (w, h))
+    if not writer.isOpened():
+        cap.release()
+        sys.exit(f"cannot write {dst} (no mp4v encoder in this OpenCV build)")
+
+    # Best read per track. A track is read in only a few of its frames, but the
+    # label belongs on the box for as long as the vehicle is in shot -- that is
+    # what the dashboard shows, and a label that blinks off tells the viewer
+    # the plate was lost when it was simply not re-read.
+    best: dict[int, tuple[str, float]] = {}
+    frames = read_attempts = 0
+    i = 0
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+        if i % step:
+            i += 1
+            continue
+        i += 1
+        res = vehicle.track(frame, persist=True, tracker="ml/botsort.yaml",
+                            classes=list(VEHICLE_CLASSES), imgsz=VEHICLE_IMGSZ,
+                            conf=VEHICLE_CONF, verbose=False)[0]
+        for box in res.boxes or []:
+            x1, y1, x2, y2 = (int(v) for v in box.xyxy[0])
+            kind = VEHICLE_CLASSES.get(int(box.cls[0]), "car")
+            tid = int(box.id[0]) if box.id is not None else -1
+            width = x2 - x1
+
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 170, 0), 2)
+            tag = f"{kind} #{tid}" if tid >= 0 else kind
+            cv2.putText(frame, tag, (x1, max(y1 - 6, 12)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 170, 0), 2)
+
+            # The gate the real pipeline applies. Below it no plate has ever
+            # been read on this footage, so paying for the attempt buys noise.
+            if reader is None or width < PLATE_MIN_VEHICLE_PX:
+                continue
+            crop = frame[max(y1, 0):y2, max(x1, 0):x2]
+            if crop.size == 0:
+                continue
+            pres = plate(crop, imgsz=PLATE_IMGSZ, conf=PLATE_CONF, verbose=False)[0]
+            if not len(pres.boxes):
+                continue
+            pb = max(pres.boxes, key=lambda b: float(b.conf[0]))
+            px1, py1, px2, py2 = (int(v) for v in pb.xyxy[0])
+            cv2.rectangle(frame, (x1 + px1, y1 + py1), (x1 + px2, y1 + py2),
+                          (0, 220, 0), 2)
+
+            if tid not in best:
+                read_attempts += 1
+                region = _pad(crop, px1, py1, px2, py2)
+                text, conf = _read_plate(reader, None, region)
+                if text:
+                    best[tid] = (text, conf or 0.0)
+
+        # Labels last, so a plate box drawn afterwards cannot cover the text.
+        for box in res.boxes or []:
+            tid = int(box.id[0]) if box.id is not None else -1
+            if tid not in best:
+                continue
+            x1, y1, x2, y2 = (int(v) for v in box.xyxy[0])
+            text, conf = best[tid]
+            label = f"{text} {conf:.2f}"
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)
+            cv2.rectangle(frame, (x1, min(y2 + 4, h - th - 8)),
+                          (x1 + tw + 6, min(y2 + th + 10, h)), (0, 220, 0), -1)
+            cv2.putText(frame, label, (x1 + 3, min(y2 + th + 6, h - 3)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2)
+
+        writer.write(frame)
+        frames += 1
+        if args.max_frames and frames >= args.max_frames:
+            break
+
+    cap.release(); writer.release()
+    print(f"\nwrote {dst}  ({frames} frames at {fps / step:.0f} fps)")
+    print(f"{len(best)} plate(s) read from {read_attempts} attempt(s) "
+          f"on vehicles at least {PLATE_MIN_VEHICLE_PX}px wide")
+    for tid, (text, conf) in sorted(best.items()):
+        print(f"  #{tid:<4} {text}  {conf:.2f}")
+
+
 def pick_model(explicit: str | None) -> str:
+    """The detector the SIDECAR would load, not a second opinion about it.
+
+    This kept its own copy of the candidate list, so when ml/sidecar.py's
+    default moved to the trained plate-k12 weights this demo silently went on
+    rendering with the older YOLOv8n -- a video captioned "the new detector"
+    that showed the old one. One search, in one place, and ARGUS_PLATE_MODEL
+    overrides both together.
+    """
     if explicit:
         return explicit
-    # OpenVINO IR first: same weights, about half the latency.
-    for c in ("runs/detect/plate/weights/best_openvino_model",
-              "runs/detect/plate/weights/best.pt"):
-        if Path(c).exists():
-            return c
+    found = find_plate_weights()
+    if found:
+        return found
     sys.exit(
         "no trained weights found.\n"
-        "Expected runs/detect/plate/weights/best.pt -- train on Kaggle first "
-        "(see WORKFLOW.md Stage 1), or pass --model explicitly."
+        "Expected runs/detect/plate-k12/weights/best.pt -- train on Kaggle "
+        "first (see WORKFLOW.md Stage 1), or pass --model explicitly."
     )
 
 
@@ -61,6 +187,11 @@ def main() -> None:
                     help="default: the model's own export size, else 640")
     ap.add_argument("--ocr", action="store_true", help="also read the plate text")
     ap.add_argument("--limit", type=int, default=20, help="max images from a folder")
+    ap.add_argument("--vehicles", action="store_true",
+                    help="run the REAL pipeline: track vehicles, then read the "
+                         "plate inside each one. Video only.")
+    ap.add_argument("--max-frames", type=int, default=0,
+                    help="stop after this many processed frames (0 = all)")
     args = ap.parse_args()
 
     src = Path(args.source)
@@ -103,6 +234,13 @@ def main() -> None:
 
     args.out.mkdir(parents=True, exist_ok=True)
     is_video = items[0].suffix.lower() in VID_EXT
+
+    if args.vehicles:
+        if not is_video:
+            sys.exit("--vehicles needs a video; a still has nothing to track")
+        pipeline_video(items[0], args.out / f"{items[0].stem}_pipeline.mp4", args)
+        print(f"\nopen the results:  xdg-open {args.out}")
+        return
 
     total_plates, total_ms, frames, texts = 0, 0.0, 0, []
 
