@@ -172,6 +172,22 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ path: stri
     }
   }
 
+  // devices/<code>/where — the phone reporting where it physically is
+  if (path[0] === "devices" && path[2] === "where" && path[1]) {
+    try {
+      const body = await req.json().catch(() => ({}));
+      const { lat, lon } = body as { lat?: unknown; lon?: unknown };
+      const device = await db.setDeviceLocation(path[1], Number(lat), Number(lon));
+      if (!device) {
+        return NextResponse.json(
+          { error: "unknown code, or coordinates out of range" }, { status: 400 });
+      }
+      return ok(Device, device, route);
+    } catch (err) {
+      return down(route, err);
+    }
+  }
+
   // devices/<id>/revoke
   if (path[0] === "devices" && path[2] === "revoke" && path[1]) {
     try {

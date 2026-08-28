@@ -60,6 +60,9 @@ export const createDevice = (label: string | null) =>
 export const pairDeviceUrl = (code: string, url: string) =>
   postJson<Device>(`/devices/${encodeURIComponent(code)}/url`, { url });
 
+export const setDeviceLocation = (code: string, lat: number, lon: number) =>
+  postJson<Device>(`/devices/${encodeURIComponent(code)}/where`, { lat, lon });
+
 export const revokeDevice = (id: string) =>
   postJson<{ ok: true }>(`/devices/${encodeURIComponent(id)}/revoke`, {});
 

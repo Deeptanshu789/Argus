@@ -755,6 +755,36 @@ export async function pairDevice(
   return rows[0] ? toDevice(rows[0]) : null;
 }
 
+/**
+ * Put a paired device on the map where it actually is.
+ *
+ * createDevice() drops every phone at DEVICE_ORIGIN plus an artificial offset,
+ * because a code is issued before anyone knows where the handset will be
+ * carried. That places a real live camera at a surveyed-looking coordinate in
+ * a city it may not be in, and the map cannot tell the difference. A phone
+ * knows its own position, so it sends it.
+ *
+ * Bounds are enforced here rather than trusted: this is reachable from
+ * /cam/<code>, which is deliberately open so a phone can pair from a link
+ * without an operator password, and a NaN or a swapped pair would move a
+ * camera somewhere no map can draw.
+ */
+export async function setDeviceLocation(
+  code: string, lat: number, lon: number,
+): Promise<Device | null> {
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)
+      || Math.abs(lat) > 90 || Math.abs(lon) > 180) {
+    return null;
+  }
+  const rows = await sql<DeviceRow[]>`
+    SELECT * FROM devices WHERE code = ${code.toUpperCase()} AND NOT revoked`;
+  const row = rows[0];
+  if (!row) return null;
+  await sql`
+    UPDATE cameras SET lat = ${lat}, lon = ${lon} WHERE id = ${row.camera_id}`;
+  return toDevice(row);
+}
+
 export async function touchDevice(cameraId: string): Promise<void> {
   await sql`UPDATE devices SET last_frame_at = now() WHERE camera_id = ${cameraId}`;
 }

@@ -12,7 +12,7 @@
  * by giving it nothing extra to associate.
  */
 import { use, useCallback, useEffect, useRef, useState } from "react";
-import { getDeviceByCode } from "@/lib/api";
+import { getDeviceByCode, setDeviceLocation } from "@/lib/api";
 import { T } from "@/components/ui";
 import type { Device } from "@/contract";
 
@@ -71,6 +71,21 @@ export default function CamPage({ params }: { params: Promise<{ code: string }> 
       return;
     }
     stream.current = media;
+
+    // Where the phone IS, not where the pairing code guessed it would be.
+    // Fire and forget: a refused or unavailable fix must not stop the camera
+    // streaming, so the device simply keeps the placeholder coordinate it was
+    // created with. Same secure-context rule as getUserMedia, so if the camera
+    // opened at all this is available too.
+    navigator.geolocation?.getCurrentPosition(
+      (pos) => {
+        void setDeviceLocation(code, pos.coords.latitude, pos.coords.longitude)
+          .catch(() => {});
+      },
+      () => {},
+      { enableHighAccuracy: true, timeout: 10_000, maximumAge: 60_000 },
+    );
+
     if (video.current) {
       video.current.srcObject = media;
       await video.current.play().catch(() => {});
