@@ -768,12 +768,12 @@ async function uiSuite() {
 
   for (const [path, marker, what] of [
     // A route group adds no URL segment: src/app/(dashboard)/map is /map.
-    ["/", "Detection feed", "live view"],
-    ["/map", "Journeys", "map view"],
+    ["/", "Camera wall", "live view"],
+    ["/map", "hop ledger", "map view"],
     ["/analytics", "Scope", "analytics view"],
-    ["/search", "Vehicle search", "search view"],
-    ["/upload", "Analyse a video", "upload view"],
-    ["/devices", "Add a camera", "devices view"],
+    ["/search", "Plate number", "search view"],
+    ["/upload", "Drop a video file", "upload view"],
+    ["/devices", "Pair a phone as a camera", "devices view"],
     ["/status", "Argus — status", "status page"],
   ] as const) {
     const r = await page(path);

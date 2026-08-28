@@ -11,7 +11,7 @@
     "check": "tsc --noEmit",
     "db:setup": "tsx db/setup.ts",
     "dev": "tsx watch server.ts",
-    "selfcheck": "tsx src/server/mock.selfcheck.ts && tsx src/server/association.selfcheck.ts && tsx src/server/analytics.selfcheck.ts",
+    "selfcheck": "tsx src/components/ui.selfcheck.ts && tsx src/server/mock.selfcheck.ts && tsx src/server/association.selfcheck.ts && tsx src/server/analytics.selfcheck.ts",
     "smoke": "tsx test/smoke.ts",
     "start": "NODE_ENV=production tsx server.ts",
     "worker": "tsx worker/ingest.ts",

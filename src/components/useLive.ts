@@ -15,6 +15,9 @@ export interface LiveDetection {
   track_id: string;
   bbox: [number, number, number, number];
   vehicle_type: string;
+  /** null when OCR read nothing on this track yet. The wall draws a read box
+   *  differently from an unread one, which is the whole point of carrying it. */
+  plate_text: string | null;
   conf: number;
   at: number;
 }

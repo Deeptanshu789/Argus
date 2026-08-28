@@ -1,13 +1,17 @@
 "use client";
 /**
  * The map: camera positions, the road graph, and confirmed cross-camera
- * journeys as animated trips.
+ * journeys as animated trips — with the hop ledger beside it.
  *
  * deck.gl WITHOUT a basemap library. A MapLibre style is fetched from a remote
  * host at load, so a flaky venue network turns the centrepiece view into a
  * blank page — and the demo is graded live. The OSM raster tiles below are a
  * bonus: TileLayer failing renders nothing and every deck.gl layer still draws.
  * The cameras, links and trajectories ARE the content.
+ *
+ * The ledger is the other half of the argument. An arc on a map says two
+ * cameras saw the same vehicle; only the ledger says WHY the system believes
+ * it, hop by hop, and that is the claim Module C has to defend.
  */
 import { useEffect, useMemo, useState } from "react";
 import DeckGL from "@deck.gl/react";
@@ -15,7 +19,10 @@ import { ArcLayer, PathLayer, ScatterplotLayer, TextLayer, BitmapLayer } from "@
 import { TileLayer, TripsLayer } from "@deck.gl/geo-layers";
 import type { MapViewState, PickingInfo } from "@deck.gl/core";
 import { getCameras, getLinks, getTrajectories } from "@/lib/api";
-import { Empty, Panel, T, Tag, methodColour, statusColour } from "@/components/ui";
+import {
+  Conf, Empty, LABEL, META, MONO, Panel, Pips, Plate, SANS, T,
+  clock, hopTime, methodColour,
+} from "@/components/ui";
 import { usePoll } from "@/components/useLive";
 import type { Camera, CameraLink, Trajectory } from "@/contract";
 
@@ -27,6 +34,31 @@ const RGB = (hex: string): [number, number, number] => [
   parseInt(hex.slice(1, 3), 16), parseInt(hex.slice(3, 5), 16), parseInt(hex.slice(5, 7), 16),
 ];
 
+/** deck.gl wants literal channels, and the palette is CSS custom properties.
+ *  Resolve them once against the live document so the map re-colours with the
+ *  theme instead of freezing whichever palette was active at first paint. */
+function useInk(): Record<string, [number, number, number]> {
+  const [ink, setInk] = useState<Record<string, [number, number, number]>>({});
+  useEffect(() => {
+    const read = () => {
+      const cs = getComputedStyle(document.documentElement);
+      const of = (name: string): [number, number, number] => {
+        const v = cs.getPropertyValue(name).trim();
+        if (v.startsWith("#")) return RGB(v);
+        const m = v.match(/\d+/g);
+        return m ? [Number(m[0]), Number(m[1]), Number(m[2])] : [130, 130, 130];
+      };
+      setInk({ accent: of("--accent"), info: of("--info"), ok: of("--ok"),
+               warn: of("--warn"), line2: of("--line2"), ink: of("--ink") });
+    };
+    read();
+    const mo = new MutationObserver(read);
+    mo.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+    return () => mo.disconnect();
+  }, []);
+  return ink;
+}
+
 export default function MapView() {
   const cameras = usePoll(getCameras, 15_000);
   const links = usePoll(getLinks, 60_000);
@@ -34,6 +66,7 @@ export default function MapView() {
   const [time, setTime] = useState(0);
   const [selected, setSelected] = useState<Trajectory | null>(null);
   const [basemap, setBasemap] = useState(true);
+  const ink = useInk();
 
   // Every trajectory replays on one shared clock, so journeys that really
   // overlapped in time overlap on screen.
@@ -51,7 +84,11 @@ export default function MapView() {
   const byId = useMemo(
     () => new Map((cameras ?? []).map((c) => [c.id, c])), [cameras]);
 
-  const shown = selected ? [selected] : (trajectories ?? []);
+  const all = trajectories ?? [];
+  const shown = selected ? [selected] : all;
+  const colourOf = (m: string): [number, number, number] =>
+    (m.startsWith("plate") ? ink.accent : m.startsWith("reid") ? ink.info : ink.ok)
+    ?? [130, 130, 130];
 
   const layers = [
     basemap && new TileLayer<ImageBitmap>({
@@ -82,7 +119,7 @@ export default function MapView() {
         const a = byId.get(l.from), b = byId.get(l.to);
         return a && b ? [[a.lon, a.lat], [b.lon, b.lat]] : [];
       },
-      getColor: [80, 110, 140, 150],
+      getColor: [...(ink.line2 ?? [120, 120, 120]), 150] as [number, number, number, number],
       getWidth: 3, widthMinPixels: 1.5,
       pickable: true,
     }),
@@ -101,11 +138,12 @@ export default function MapView() {
       // Colour by the LAYER that confirmed it. A plate match and a Re-ID match
       // are different claims with different confidence, and one colour hides
       // the distinction the whole project is built on.
-      getSourceColor: (h) => RGB(methodColour(h.method)),
-      getTargetColor: (h) => RGB(methodColour(h.method)),
+      getSourceColor: (h) => colourOf(h.method),
+      getTargetColor: (h) => colourOf(h.method),
       getWidth: (h) => 1 + h.confidence * 4,
       getHeight: 0.4,
       pickable: true,
+      updateTriggers: { getSourceColor: [ink], getTargetColor: [ink] },
     }),
 
     new TripsLayer<Trajectory>({
@@ -113,10 +151,11 @@ export default function MapView() {
       data: shown,
       getPath: (t) => t.path.map((p) => [p[0], p[1]]) as [number, number][],
       getTimestamps: (t) => t.path.map((p) => p[2]),
-      getColor: (t) => (t.plate_text ? RGB(T.accent) : RGB(T.reid)),
+      getColor: (t) => (t.plate_text ? ink.accent : ink.info) ?? [130, 130, 130],
       widthMinPixels: 3,
       trailLength: Math.max(30, span * 0.25),
       currentTime: time,
+      updateTriggers: { getColor: [ink] },
     }),
 
     new ScatterplotLayer<Camera>({
@@ -124,9 +163,12 @@ export default function MapView() {
       data: cameras ?? [],
       getPosition: (c) => [c.lon, c.lat],
       getRadius: 40, radiusMinPixels: 7, radiusMaxPixels: 22,
-      getFillColor: (c) => RGB(statusColour(c.status)),
+      getFillColor: (c) => (c.status === "online" ? ink.ok
+                          : c.status === "degraded" ? ink.warn : ink.line2)
+                          ?? [130, 130, 130],
       getLineColor: [10, 15, 20], lineWidthMinPixels: 2, stroked: true,
       pickable: true,
+      updateTriggers: { getFillColor: [ink] },
     }),
 
     new TextLayer<Camera>({
@@ -134,9 +176,10 @@ export default function MapView() {
       data: cameras ?? [],
       getPosition: (c) => [c.lon, c.lat],
       getText: (c) => c.id,
-      getSize: 12, getColor: [230, 237, 243],
+      getSize: 12, getColor: ink.ink ?? [230, 237, 243],
       getPixelOffset: [0, -20],
       fontFamily: "ui-monospace, monospace",
+      updateTriggers: { getColor: [ink] },
     }),
   ].filter(Boolean);
 
@@ -154,71 +197,139 @@ export default function MapView() {
     return null;
   };
 
-  return (
-    <div style={{ display: "grid", gap: "1rem",
-                  gridTemplateColumns: "minmax(0, 1fr) minmax(260px, 320px)" }}>
-      <Panel style={{ padding: 0, overflow: "hidden", height: "calc(100vh - 8rem)",
-                      position: "relative" }}>
-        <DeckGL initialViewState={INITIAL} controller layers={layers}
-                getTooltip={tooltip}
-                onClick={(i) => {
-                  const o = i.object as { t?: Trajectory } | null;
-                  if (o?.t) setSelected(o.t);
-                }}
-                style={{ position: "absolute", top: "0", left: "0",
-                         width: "100%", height: "100%" }} />
-        <div style={{ position: "absolute", left: "12px", bottom: "12px", display: "flex",
-                      gap: ".5rem", alignItems: "center", background: `${T.panel}dd`,
-                      padding: ".4rem .7rem", borderRadius: 6, fontSize: 11,
-                      border: `1px solid ${T.line}` }}>
-          <Tag colour={T.accent}>plate</Tag>
-          <Tag colour={T.reid}>reid</Tag>
-          <Tag colour={T.ok}>spatial_temporal</Tag>
-          <label style={{ color: T.dim, marginLeft: ".5rem", cursor: "pointer" }}>
-            <input type="checkbox" checked={basemap}
-                   onChange={(e) => setBasemap(e.target.checked)} /> basemap
-          </label>
-        </div>
-      </Panel>
+  const sel = selected ?? all[0] ?? null;
 
-      <div style={{ display: "grid", gap: "1rem", alignContent: "start" }}>
-        <Panel title={selected ? "Selected journey" : `Journeys — ${(trajectories ?? []).length}`}
-               right={selected ? (
-                 <button onClick={() => setSelected(null)} style={{
-                   background: "transparent", border: `1px solid ${T.line}`,
-                   color: T.dim, borderRadius: 4, fontSize: 11,
-                   padding: "2px 7px", cursor: "pointer" }}>show all</button>
-               ) : undefined}>
-          <div style={{ maxHeight: "calc(100vh - 14rem)", overflowY: "auto" }}>
-            {(trajectories ?? []).length ? (trajectories ?? []).map((t) => (
-              <button key={t.id} onClick={() => setSelected(t)} style={{
-                display: "block", width: "100%", textAlign: "left", cursor: "pointer",
-                background: selected?.id === t.id ? T.raised : "transparent",
-                border: "none", borderBottom: `1px solid ${T.line}`,
-                color: T.text, padding: ".5rem .3rem",
-              }}>
-                <div style={{ fontSize: 13 }}>
-                  {t.plate_text ?? <span style={{ color: T.reid }}>unidentified</span>}
-                </div>
-                <div style={{ fontSize: 11, color: T.dim, marginTop: 2 }}>
-                  {t.path.length} cameras · {t.hops.length} hop
-                  {t.hops.length === 1 ? "" : "s"}
-                </div>
-                <div style={{ display: "flex", gap: ".3rem", marginTop: 4, flexWrap: "wrap" }}>
-                  {t.hops.map((h, i) => (
-                    <Tag key={i} colour={methodColour(h.method)}>{h.method}</Tag>
-                  ))}
-                </div>
-              </button>
-            )) : (
-              <Empty>
-                No journeys yet. One appears when Module C confirms the same
-                vehicle at two cameras.
-              </Empty>
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "1fr 372px", gap: 14,
+                  alignItems: "start" }}>
+      <div style={{ minWidth: 0, border: `1px solid ${T.line}`, background: T.panel,
+                    borderRadius: 3, overflow: "hidden", boxShadow: T.shadow }}>
+        <div style={{ padding: "10px 12px", borderBottom: `1px solid ${T.line}`,
+                      display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+          <div style={LABEL}>
+            {selected ? "One journey" : `${all.length} journeys · road graph`}
+          </div>
+          <div style={{ flex: 1 }} />
+          <button onClick={() => setBasemap(!basemap)} style={{
+            border: `1px solid ${basemap ? T.text : T.line2}`,
+            background: basemap ? T.text : "transparent",
+            color: basemap ? T.panel : T.dim, borderRadius: 2, padding: "3px 8px",
+            font: `500 9.5px ${MONO}`, letterSpacing: ".09em",
+          }}>BASEMAP</button>
+          {selected && (
+            <button onClick={() => setSelected(null)} style={{
+              border: `1px solid ${T.line2}`, background: "transparent", color: T.dim,
+              borderRadius: 2, padding: "3px 8px", font: `500 9.5px ${MONO}`,
+              letterSpacing: ".09em",
+            }}>SHOW ALL</button>
+          )}
+          <div style={{ display: "flex", alignItems: "center", gap: 5, ...META }}>
+            <span style={{ display: "inline-block", width: 20,
+                           borderTop: `2.5px solid ${T.text}` }} />3 of 3 agree
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 5, ...META }}>
+            <span style={{ display: "inline-block", width: 20,
+                           borderTop: `2.5px dashed ${T.faint}` }} />2 of 3
+          </div>
+        </div>
+        <div style={{ position: "relative", height: "calc(100vh - 11rem)" }}>
+          <DeckGL initialViewState={INITIAL} controller layers={layers}
+                  getTooltip={tooltip}
+                  onClick={(i) => {
+                    const o = i.object as { t?: Trajectory } | null;
+                    if (o?.t) setSelected(o.t);
+                  }}
+                  style={{ position: "absolute", top: "0", left: "0",
+                           width: "100%", height: "100%" }} />
+        </div>
+      </div>
+
+      <div style={{ minWidth: 0, display: "flex", flexDirection: "column", gap: 12 }}>
+        <Panel flush title="Trajectories"
+               right={<span className="tnum" style={META}>{all.length} shown</span>}>
+          <div style={{ maxHeight: 246, overflowY: "auto" }}>
+            {all.length ? all.map((t) => {
+              const on = sel?.id === t.id;
+              return (
+                <button key={t.id} onClick={() => setSelected(t)} style={{
+                  display: "block", width: "100%", textAlign: "left",
+                  background: on ? T.accentSoft : "transparent", border: "none",
+                  borderBottom: `1px solid ${T.line}`, color: T.text,
+                  padding: "var(--rowpad) 12px",
+                }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <div style={{ flex: 1, minWidth: 0 }}><Plate text={t.plate_text} /></div>
+                    <div className="tnum" style={META}>{clock(t.started_at)}</div>
+                  </div>
+                  <div style={{ marginTop: 7, display: "flex", alignItems: "center", gap: 8 }}>
+                    <div style={{ font: `400 10.5px ${MONO}`, color: T.dim,
+                                  letterSpacing: ".03em", overflow: "hidden",
+                                  textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {[t.hops[0]?.from_camera, ...t.hops.map((h) => h.to_camera)]
+                        .filter(Boolean).join(" → ") || `${t.path.length} points`}
+                    </div>
+                    <div style={{ flex: 1 }} />
+                    <div className="tnum" style={{ ...META, width: 44, textAlign: "right" }}>
+                      {t.hops.length} hop{t.hops.length === 1 ? "" : "s"}
+                    </div>
+                  </div>
+                </button>
+              );
+            }) : (
+              <div style={{ padding: "12px 14px" }}>
+                <Empty>
+                  No journeys yet. One appears when Module C confirms the same
+                  vehicle at two cameras.
+                </Empty>
+              </div>
             )}
           </div>
+        </Panel>
+
+        <Panel flush title="Selected · hop ledger"
+               right={sel ? <Plate text={sel.plate_text} /> : undefined}>
+          {sel?.hops.length ? sel.hops.map((h, i, hs) => (
+            <div key={i} style={{ padding: "var(--rowpad) 12px",
+                                  borderBottom: i === hs.length - 1
+                                    ? "none" : `1px solid ${T.line}` }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+                <div style={{ flex: 1, minWidth: 0, font: `400 11px ${MONO}`,
+                              letterSpacing: ".03em" }}>
+                  {h.from_camera} → {h.to_camera}
+                </div>
+                <div className="tnum" style={META}>{hopTime(h.travel_time_s)}</div>
+              </div>
+              <div style={{ marginTop: 7, display: "flex", alignItems: "center", gap: 10 }}>
+                <Pips method={h.method} />
+                <div style={{ flex: 1, minWidth: 0, display: "flex", alignItems: "center",
+                              gap: 6 }}>
+                  <Conf value={h.confidence} width="100%" colour={methodColour(h.method)} />
+                  <span style={{ font: `400 9.5px ${MONO}`, letterSpacing: ".08em",
+                                 color: T.faint, textTransform: "uppercase",
+                                 whiteSpace: "nowrap" }}>
+                    {h.method === "spatial_temporal" ? "spatio-temporal" : h.method}
+                  </span>
+                </div>
+              </div>
+              <div style={{ marginTop: 6, font: `400 10.5px/1.5 ${SANS}`, color: T.faint }}>
+                {byName(h.from_camera, byId)} to {byName(h.to_camera, byId)}.
+                {" "}Confirmed by {h.method === "spatial_temporal" ? "travel-time feasibility"
+                  : h.method === "reid" ? "appearance similarity" : "plate text"} at{" "}
+                {h.confidence.toFixed(2)}.
+              </div>
+            </div>
+          )) : (
+            <div style={{ padding: "12px 14px" }}>
+              <Empty>
+                {sel ? "Single camera — no cross-camera hop to explain."
+                     : "Pick a trajectory to see why each hop was believed."}
+              </Empty>
+            </div>
+          )}
         </Panel>
       </div>
     </div>
   );
 }
+
+const byName = (id: string, byId: Map<string, Camera>) => byId.get(id)?.name ?? id;
